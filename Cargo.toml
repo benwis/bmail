@@ -1,0 +1,29 @@
+[package]
+name = "bsky_dms_client"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name="bmail"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+age = "0.9.1"
+# bisky = {git="https://github.com/benwis/bisky", branch="firehose"}
+bisky = {path="../../bisky"}
+chrono = "0.4.24"
+clap = "4.2.7"
+config = "0.13.3"
+crossterm = "0.26.1"
+futures = "0.3.28"
+miette = "5.8.0"
+parking_lot = "0.12.1"
+ratatui = "0.20.1"
+serde = { version = "1.0.162", features = ["derive"] }
+serde_cbor = "0.11.2"
+thiserror = "1.0.40"
+tokio = { version = "1.28.0", features = ["full"] }
+tokio-tungstenite = { version = "0.18.0", features = ["native-tls"] }
+unicode-width = "0.1.10"
+url = "2.3.1"
