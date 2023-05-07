@@ -52,11 +52,13 @@ async fn main() -> Result<(), BmailError> {
     .unwrap();
 
     let bsky = SharableBluesky::new(client);
-    
+
+    // create app and run it
+    let app = App { bluesky: Some(bsky.clone()), identity: Some(identity.clone()), message_rx: Some(rx), ..Default::default() };
     // A new task is spawned for processing firehose messages. The socket is
     // moved to the new task and processed there.
     let _firehose = tokio::spawn(async move {
-        let _ = process_message(socket, tx, bsky.clone(), identity, conf).await;
+        let _ = process_message(socket, tx, bsky.clone(), identity.clone(), conf).await;
     });
 
     // firehose.await.unwrap();
@@ -68,8 +70,8 @@ async fn main() -> Result<(), BmailError> {
      let backend = CrosstermBackend::new(stdout);
      let mut terminal = Terminal::new(backend)?;
  
-     // create app and run it
-     let app = App::default();
+
+
      let res = run_app(&mut terminal, app);
  
      // restore terminal

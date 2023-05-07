@@ -2,7 +2,6 @@ use age::x25519::Identity;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
 };
-use futures::channel::mpsc::Receiver;
 use ratatui::{
     backend::Backend,
     layout::{Constraint, Direction, Layout},
@@ -11,12 +10,13 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame, Terminal,
 };
+use tokio::sync::mpsc::Receiver;
 use std::io;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{SharableBluesky, message::{Message, Conversations}};
 
-enum InputMode {
+pub enum InputMode {
     Normal,
     Editing,
     EditingRecipient,
@@ -25,23 +25,23 @@ enum InputMode {
 /// App holds the state of the application
 pub struct App {
     /// Current value of the recipient box
-    recipient: String,
+    pub recipient: String,
     /// Current value of the input box
-    input: String,
+    pub input: String,
     /// Current value of the status field
-    status: String,
+    pub status: String,
     /// Current input mode
-    input_mode: InputMode,
+    pub input_mode: InputMode,
     /// History of recorded messages
-    messages: Vec<String>,
+    pub messages: Vec<String>,
     /// Bluesky object for API Calls
-    bluesky: Option<SharableBluesky>,
+    pub bluesky: Option<SharableBluesky>,
     /// Identity for Decrypting DMs
-    identity: Option<Identity>,
+    pub identity: Option<Identity>,
     /// Channel for Receiving Messages
-    message_rx: Option<Receiver<Message>>,
+    pub message_rx: Option<Receiver<Message>>,
     /// Storage Medium for Conversations and Messages
-    conversations: Conversations
+    pub conversations: Conversations
 
 }
 
