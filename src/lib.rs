@@ -4,12 +4,12 @@ use bisky::{bluesky::Bluesky, atproto::Client, lexicon::app::bsky::actor::Profil
 use tokio::sync::{oneshot, RwLock};
 
 pub mod key;
-pub mod dm;
 pub mod conf;
 pub mod errors;
 pub mod ui;
 pub mod message;
 
+#[derive(Default)]
 pub struct SharableBluesky(pub Arc<RwLock<Bluesky>>);
 
 impl SharableBluesky{

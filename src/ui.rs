@@ -1,4 +1,5 @@
-use age::x25519::Identity;
+use age::{x25519::{Identity, Recipient}};
+use bisky::lexicon::app::bsky::feed::Post;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
 };
@@ -10,11 +11,12 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame, Terminal,
 };
+use regex::Regex;
 use tokio::sync::mpsc::Receiver;
-use std::io;
+use std::{io::Write, str::FromStr};
 use unicode_width::UnicodeWidthStr;
 
-use crate::{SharableBluesky, message::{Message, Conversations}};
+use crate::{SharableBluesky, message::{Message, Conversations}, errors::BmailError, conf::Settings};
 
 pub enum InputMode {
     Normal,
@@ -35,14 +37,73 @@ pub struct App {
     /// History of recorded messages
     pub messages: Vec<String>,
     /// Bluesky object for API Calls
-    pub bluesky: Option<SharableBluesky>,
+    pub bluesky: SharableBluesky,
     /// Identity for Decrypting DMs
-    pub identity: Option<Identity>,
+    pub identity: Identity,
+    /// The currently active Recipient
+    pub current_recipient: Option<Recipient>,
     /// Channel for Receiving Messages
     pub message_rx: Option<Receiver<Message>>,
     /// Storage Medium for Conversations and Messages
-    pub conversations: Conversations
+    pub conversations: Conversations,
+    /// App Settings
+    pub conf: Settings
 
+}
+
+impl App{
+    /// Scrape the recipient's Profile for their Public Key so we can encrypt this thing
+    pub async fn get_recipient_identity(&mut self, recipient: &str) -> Result<Recipient, BmailError>{
+        let mut bsky = self.bluesky.0.write().await;
+        let mut user = bsky.user(&self.conf.user.handle)?;
+        let recipient_profile = user.get_profile_other(recipient).await?;
+        let Some(description) = recipient_profile.description else {
+            return Err(BmailError::MissingRecipientIdentity)
+        };
+        println!("Description: {}", &description);
+
+        let re = Regex::new(r"bmail:(.*)\s").unwrap();
+        let pubkey = match re.captures(&description){
+            Some(r)=> r.get(0).unwrap().as_str(),
+            None => return Err(BmailError::MissingRecipientIdentity)
+        }.to_string();
+        println!("Found Public Key: {}", &pubkey);
+        let recipient = Recipient::from_str(&pubkey).map_err(|_| BmailError::ParseRecipientError)?;
+        
+        Ok(recipient)
+    }
+    /// Send a DM
+    pub async fn send_dm(&mut self, recipient: &str, msg: &str) -> Result<(), BmailError>{
+        let pubkey: Recipient = self.get_recipient_identity(recipient).await?;
+
+        let mut bsky = self.bluesky.0.write().await;
+        let mut me = bsky.me().map_err::<BmailError, _>(Into::into)?;
+
+
+        // Encrypt the plaintext to a ciphertext...
+        let encryptor = age::Encryptor::with_recipients(vec![Box::new(pubkey)])
+            .expect("we provided a recipient");
+
+        let mut encrypted = vec![];
+        let mut writer = encryptor.wrap_output(&mut encrypted).map_err::<BmailError, _>(Into::into)?;
+        writer.write_all(msg.as_bytes())?;
+        writer.finish()?;
+
+        // Construct Dm
+        // //dm::@recipient::message
+        let dm = format!("//dm::@{}::{:?}", recipient, encrypted);
+
+        
+        let post = Post{
+            rust_type: Some("app.bsky.feed.post".to_string()),
+            text: dm,
+            created_at: None,
+            embed: None,
+            reply: None,
+        };
+        me.post(post).await?;
+        Ok(())
+    }
 }
 
 impl Default for App {
@@ -52,16 +113,18 @@ impl Default for App {
             recipient: String::new(),
             input_mode: InputMode::Normal,
             messages: Vec::new(),
-            bluesky: None,
-            identity: None,
+            bluesky: SharableBluesky::default(),
+            identity: Identity::generate(),
             message_rx: None,
             status: "ALL GOOD".to_string(),
             conversations: Conversations::default(),
+            conf: Settings::default(),
+            current_recipient: None,
         }
     }
 }
 
-pub fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
+pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result<(), BmailError> {
     loop {
         //TODO: Read Messages from Message Channel and add to Conversations
         
@@ -83,8 +146,11 @@ pub fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Resu
                 },
                 InputMode::Editing if key.kind == KeyEventKind::Press => match key.code {
                     KeyCode::Enter => {
-                        app.messages.push(app.input.drain(..).collect());
                         //TODO: Create and Send Post
+                        let recipient = &app.recipient.clone();
+                        let msg = &app.input.clone();
+                        app.send_dm(recipient, msg).await?;
+                        app.messages.push(app.input.drain(..).collect());
                     }
                     KeyCode::Char(c) => {
                         app.input.push(c);
@@ -114,7 +180,7 @@ pub fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Resu
                         app.input_mode = InputMode::EditingRecipient;
                     },
                     KeyCode::Enter => {
-                        //TODO: Get public key of new recipient or display error
+                        //TODO: Get public key of new recipient and display success failure. Load old messages maybe.
                     }
                     _ => {}
                 },
@@ -242,9 +308,9 @@ match app.input_mode {
         // Make the cursor visible and ask ratatui to put it at the specified coordinates after rendering
         f.set_cursor(
             // Put cursor past the end of the input text
-            chunks[3].x + app.recipient.width() as u16 + 1,
+            chunks[2].x + app.recipient.width() as u16 + 1,
             // Move one line down, from the border to the input line
-            chunks[3].y + 1,
+            chunks[2].y + 1,
         )
     }
 }

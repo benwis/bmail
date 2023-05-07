@@ -54,7 +54,7 @@ async fn main() -> Result<(), BmailError> {
     let bsky = SharableBluesky::new(client);
 
     // create app and run it
-    let app = App { bluesky: Some(bsky.clone()), identity: Some(identity.clone()), message_rx: Some(rx), ..Default::default() };
+    let app = App { bluesky: bsky.clone(), identity: identity.clone(), message_rx: Some(rx), ..Default::default() };
     // A new task is spawned for processing firehose messages. The socket is
     // moved to the new task and processed there.
     let _firehose = tokio::spawn(async move {
@@ -72,7 +72,7 @@ async fn main() -> Result<(), BmailError> {
  
 
 
-     let res = run_app(&mut terminal, app);
+     let res = run_app(&mut terminal, app).await;
  
      // restore terminal
      disable_raw_mode()?;

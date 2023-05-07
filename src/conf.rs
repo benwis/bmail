@@ -3,19 +3,19 @@ use serde::{Serialize, Deserialize};
 use std::path::PathBuf;
 use crate::errors::BmailError;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
     pub user: UserSettings,
     pub key: KeySettings,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct UserSettings{
     pub handle: String,
     pub password: String
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct KeySettings{
     pub file_path: PathBuf,
 }

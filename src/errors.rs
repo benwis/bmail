@@ -7,6 +7,12 @@ use crate::message::Message;
 pub enum BmailError{
     #[error("Internal Server Error")]
     InternalServerError,
+    #[error("Missing Session")]
+    MissingSession,
+    #[error("Missing Identity")]
+    MissingIdentity,
+    #[error("Missing Recipient Identity")]
+    MissingRecipientIdentity,
     #[error(transparent)]
     ConfigError(#[from] config::ConfigError),
     #[error(transparent)]
@@ -16,9 +22,15 @@ pub enum BmailError{
     #[error(transparent)]
     DecryptError(#[from] age::DecryptError),
     #[error(transparent)]
+    EncryptError(#[from] age::EncryptError),
+    #[error(transparent)]
     FromStringError(#[from] std::string::FromUtf8Error),
     #[error("Tokio Send Error {0}")]
     TokioSendError(String),
+    #[error(transparent)]
+    BiskyError(#[from] bisky::errors::BiskyError),
+    #[error("Failed to Parse Recipient Key String")]
+    ParseRecipientError
 }
 
 impl From< tokio::sync::mpsc::error::SendError<Message>> for BmailError{

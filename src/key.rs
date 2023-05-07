@@ -6,12 +6,6 @@ use age::secrecy::ExposeSecret;
 
 use crate::errors::BmailError;
 
-/// Get the identity for a recipient or sender other than me from their profile info
-pub fn get_user_key_from_profile() -> Result<String, BmailError>{
-//TODO: Parse profile for identity
-Ok(String::new())
-}
-
 /// Attempt to read saved identity from file or generate a new one for the user of the app
 pub fn get_identity(path: &PathBuf) -> Result<Identity, BmailError>{
     let mut f = OpenOptions::new()
