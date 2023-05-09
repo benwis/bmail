@@ -9,7 +9,9 @@ name="bmail"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-age = "0.9.1"
+age = {version="0.9.1", features=["armor"]}
+base2048 = "2.0.2"
+base64 = "0.21.0"
 # bisky = {git="https://github.com/benwis/bisky", branch="firehose"}
 bisky = {path="../../bisky"}
 chrono = "0.4.24"
@@ -21,6 +23,7 @@ miette = "5.8.0"
 parking_lot = "0.12.1"
 ratatui = "0.20.1"
 regex = "1.8.1"
+rust-lzma = "0.6.0"
 serde = { version = "1.0.162", features = ["derive"] }
 serde_cbor = "0.11.2"
 thiserror = "1.0.40"
@@ -28,3 +31,4 @@ tokio = { version = "1.28.0", features = ["full"] }
 tokio-tungstenite = { version = "0.18.0", features = ["native-tls"] }
 unicode-width = "0.1.10"
 url = "2.3.1"
+uuid = { version = "1.3.2", features = ["v4", "serde"] }

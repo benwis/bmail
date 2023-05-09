@@ -1,10 +1,10 @@
-use thiserror::Error;
 use miette::Diagnostic;
+use thiserror::Error;
 
 use crate::message::Message;
 
 #[derive(Debug, Error, Diagnostic)]
-pub enum BmailError{
+pub enum BmailError {
     #[error("Internal Server Error")]
     InternalServerError,
     #[error("Missing Session")]
@@ -13,6 +13,10 @@ pub enum BmailError{
     MissingIdentity,
     #[error("Missing Recipient Identity")]
     MissingRecipientIdentity,
+    #[error("Missing Recipient {0}")]
+    MissingRecipient(String),
+    #[error("Missing Recipient Keys")]
+    MultipleRecipientKeys,
     #[error(transparent)]
     ConfigError(#[from] config::ConfigError),
     #[error(transparent)]
@@ -30,10 +34,10 @@ pub enum BmailError{
     #[error(transparent)]
     BiskyError(#[from] bisky::errors::BiskyError),
     #[error("Failed to Parse Recipient Key String")]
-    ParseRecipientError
+    ParseRecipientError,
 }
 
-impl From< tokio::sync::mpsc::error::SendError<Message>> for BmailError{
+impl From<tokio::sync::mpsc::error::SendError<Message>> for BmailError {
     fn from(value: tokio::sync::mpsc::error::SendError<Message>) -> Self {
         Self::TokioSendError(value.to_string())
     }

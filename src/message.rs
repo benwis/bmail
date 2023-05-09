@@ -1,41 +1,73 @@
+use bisky::lexicon::com::atproto::repo::Blob;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use std::collections::HashMap;
-use chrono::{Utc, DateTime};
-/// Hashmap with DID Key of recipient and Vec of Message Types 
-///Hashmap<String, Vec<String>>
 
-#[derive(Default)]
-pub struct Conversations(pub HashMap<String, Vec<Message>>);
+/// A data structure to hold a conversation between a group of individuals
+/// Stored in an bsky.actor.profile Record, clients will find it by parsing the id from
+/// the notification of the like of their notification post.  
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct ConversationPortion {
+    /// The type of the Record for Bluesky
+    #[serde(rename(serialize = "$type", deserialize = "$type"))]
+    pub r#type: String,
+    /// The time the conversation was created
+    #[serde(rename(serialize = "createdAt", deserialize = "createdAt"))]
+    pub bmail_created_at: Option<DateTime<Utc>>,
+    /// A Unique ID for the conversation, to make it easier for clients to poll a particular conversation. Multiple Records might have the same ID, this means they are participants of the same chain
+    pub bmail_conversation_id: Option<Uuid>,
+    /// Indicates, in sequential order, which block of messages this Conversation represents. This is done to avoid the 100k request limit for Bsky
+    pub bmail_conversation_index: Option<u64>,
+    /// The messages in a Conversation. Keyed by the DIDs of the participants and the
+    pub bmail_messages: Option<Vec<Message>>,
+    /// The participants in a Conversation. Keyed by the DIDs of the participants, the value is the bmail index for when they were added 
+    pub participants: Option<HashMap<String, u128>>,
+}
 
-impl Conversations{
-    /// Add a message to the messages storage method
-    pub fn add(&mut self, command: &str, sender_did: &str, recipient_did: &str, raw_message: &str, message: &str, created_at: &DateTime<Utc>){
-        let message_struct = Message{
-            created_at: created_at.to_owned(),
-            message: Some(message.to_string()),
-            command: command.to_string(),
-            sender_did: sender_did.to_string(),
-            recipient_did: recipient_did.to_string(),
-            raw_message: raw_message.to_string(),
-
-        };
-        match self.0.get_mut(sender_did){
-            Some(r) => r.push(message_struct),
-            None => {
-                let msgs = vec![message_struct];
-                self.0.insert(sender_did.to_string(), msgs);
-            }
-        };
-
+impl ConversationPortion {
+    /// Create a new Conversation between some recipients(indicated by DID)
+    pub fn new(&mut self, recipients: Vec<String>) -> Self {
+        // Create a record of which messages are encoded for which recipients. New recipients can be added later, but will require each participant
+        // to update their recipient keys to include them.
+        let og_participants = recipients.iter().map(|r| (r.to_string(), 0)).collect();
+        Self {
+            r#type: "bsky.actor.profile".to_string(),
+            bmail_created_at: Some(Utc::now()),
+            bmail_conversation_id: Some(Uuid::new_v4()),
+            bmail_messages: Some(Vec::new()),
+            bmail_conversation_index: Some(0),
+            participants: Some(og_participants),
+        }
+    }
+    /// Add a message to the Conversation
+    pub fn add_message(&mut self, msg: &Message) {
+        if let Some(conversation) = &mut self.bmail_messages {
+            conversation.push(msg.clone());
+        }
     }
 }
 
-
-//Contains information about the received message
+//Data structure for a single Bmail
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    pub command: String,
-    pub sender_did: String, 
-    pub recipient_did: String, 
-    pub created_at: DateTime<Utc>, 
+    pub created_at: DateTime<Utc>,
+    pub creator: String,
     pub raw_message: String,
-    pub message: Option<String>
+    pub message: String,
+}
+
+/// Record type that can be passed to create_record() to store identity info(public_key) about the sender in a user profile.
+/// Probably wrapped in Record<BmailEnbaledProfile>
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BmailEnabledProfile {
+    #[serde(rename(deserialize = "$type", serialize = "$type"))]
+    pub rust_type: Option<String>,
+    pub avatar: Option<Blob>,
+    pub banner: Option<Blob>,
+    pub description: Option<String>,
+    #[serde(rename(deserialize = "displayName", serialize = "displayName"))]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bmail_pub_key: Option<String>,
 }

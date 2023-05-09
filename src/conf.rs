@@ -1,7 +1,7 @@
-use config::Config;
-use serde::{Serialize, Deserialize};
-use std::path::PathBuf;
 use crate::errors::BmailError;
+use config::Config;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
@@ -10,13 +10,13 @@ pub struct Settings {
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
-pub struct UserSettings{
+pub struct UserSettings {
     pub handle: String,
-    pub password: String
+    pub password: String,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
-pub struct KeySettings{
+pub struct KeySettings {
     pub file_path: PathBuf,
 }
 
