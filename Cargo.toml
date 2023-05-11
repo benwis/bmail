@@ -19,6 +19,7 @@ clap = "4.2.7"
 config = "0.13.3"
 crossterm = "0.26.1"
 futures = "0.3.28"
+indexmap = { version = "1.9.3", features = ["serde"] }
 miette = "5.8.0"
 parking_lot = "0.12.1"
 ratatui = "0.20.1"

@@ -7,6 +7,7 @@ use std::{path::PathBuf, str::FromStr};
 
 use crate::errors::BmailError;
 use crate::message::BmailEnabledProfile;
+use crate::SharableBluesky;
 
 /// Attempt to read saved identity from file or generate a new one for the user of the app
 pub fn get_identity(path: &PathBuf) -> Result<Identity, BmailError> {
@@ -33,6 +34,24 @@ pub fn get_identity(path: &PathBuf) -> Result<Identity, BmailError> {
     }
     Ok(identity)
 }
+
+/// Scrape the recipient's Profile for their Public Key so we can encrypt this thing
+pub async fn get_recipient_for_bskyer(
+    bsky: SharableBluesky,
+    handle: &str,
+) -> Result<(Option<Recipient>, Record<BmailEnabledProfile>), BmailError> {
+    let mut bsky = bsky.0.write().await;
+    let mut user = bsky.user(&handle)?;
+
+    let profile_record = user
+        .get_record::<BmailEnabledProfile>(handle, "app.bsky.actor.profile", "self")
+        .await?;
+    let recipient = match &profile_record.value.bmail_pub_key {
+        Some(k) => Some(Recipient::from_str(k).map_err(|_| BmailError::ParseRecipientError)?),
+        None => None,
+    };
+    Ok((recipient, profile_record))
+}
 // /// Process Recipient Identity from a an actor.profile Record
 // pub fn process_profile_records_for_identity(records: Vec<Record<BmailInfo>>) -> Result<Recipient, BmailError>{
 //     let mut pub_key = None;
@@ -40,7 +59,7 @@ pub fn get_identity(path: &PathBuf) -> Result<Identity, BmailError> {
 //         if record.value.bmail_type == "bmail_pubkey" && pub_key.is_none(){
 //             pub_key = match record.value.bmail_pub_key{
 //                 Some(k) => {
-//                     println!("Found Public Key: {}", &k); 
+//                     println!("Found Public Key: {}", &k);
 //                     Some(k)
 //                 },
 //                 None => return Err(BmailError::MissingRecipientIdentity)
@@ -50,7 +69,7 @@ pub fn get_identity(path: &PathBuf) -> Result<Identity, BmailError> {
 //             return Err(BmailError::MultipleRecipientKeys)
 //         }
 //     }
- 
+
 //     if let Some(pub_key) = pub_key{
 //     let recipient =
 //         Recipient::from_str(&pub_key).map_err(|_| BmailError::ParseRecipientError)?;

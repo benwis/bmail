@@ -1,12 +1,11 @@
 use age::x25519::Identity;
 use bisky::atproto::{ClientBuilder, UserSession};
 use bisky::firehose::cbor::Body as FirehoseBody;
-use bisky::firehose::models::FirehosePost;
 use bisky::storage::File;
 use bmail::conf::{get_configuration, Settings};
 use bmail::errors::BmailError;
 use bmail::key::get_identity;
-use bmail::message::Message as BMessage;
+use bmail::message::{BmailMessageRecord, DecryptedMessage};
 use bmail::ui::{run_app, App};
 use bmail::SharableBluesky;
 use crossterm::{
@@ -62,7 +61,10 @@ async fn main() -> Result<(), BmailError> {
     let bsky = SharableBluesky::new(client);
     let user_did = {
         let mut bsky_client = bsky.0.write().await;
-        bsky_client.user(&conf.user.handle)?.resolve_handle(&conf.user.handle).await?
+        bsky_client
+            .user(&conf.user.handle)?
+            .resolve_handle(&conf.user.handle)
+            .await?
     };
 
     // create app and run it
@@ -114,7 +116,7 @@ async fn main() -> Result<(), BmailError> {
 
 pub async fn process_message(
     mut socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
-    tx: Sender<BMessage>,
+    tx: Sender<DecryptedMessage>,
     bsky: SharableBluesky,
     identity: Identity,
     conf: Settings,
@@ -136,59 +138,12 @@ pub async fn process_message(
                 let car_blocks = bisky::firehose::car::read_blocks(&mut car_reader).unwrap();
 
                 let record_reader = Cursor::new(car_blocks.get(&cid).unwrap());
-                let post = serde_cbor::from_reader::<FirehosePost, _>(record_reader)
+                let bmail = serde_cbor::from_reader::<serde_cbor::Value, _>(record_reader)
                     .map_err::<BmailError, _>(Into::into)?;
-                // println!("{post:?}");
-                if post.text.starts_with("/dm") {
-                    println!("\n\nFOUND A DM LOOK AT ME\n\n");
-                    println!("Text: {}", &post.text);
-                    if post.text.contains(&format!("@{}", &conf.user.handle)) {
-                        let poster_did = commit.repo;
-                        let mut user = bsky.user(&conf.user.handle).unwrap();
-                        let sender = user
-                            .get_profile_other(&poster_did)
-                            .await
-                            .expect("Failed to get profile for known user!");
-                        let sender_handle = sender.handle;
-                        let raw_text: Vec<&str> = post.text.split("::").collect();
-
-                        if raw_text.len() != 3 {
-                            // Malformed DM
-                            println!("MALFORMED DM");
-                            continue;
-                        }
-                        let command = raw_text[0];
-                        let recipient = raw_text[1];
-                        let message = raw_text[2];
-                        println!("{command}::{sender_handle}::{recipient}::{message}");
-                        // Decrypt Message
-                        let decrypted = {
-                            let decryptor = match age::Decryptor::new(message.as_bytes())
-                                .map_err::<BmailError, _>(Into::into)?
-                            {
-                                age::Decryptor::Recipients(d) => d,
-                                _ => unreachable!(),
-                            };
-
-                            let mut decrypted = vec![];
-                            let mut reader = decryptor
-                                .decrypt(std::iter::once(&identity as &dyn age::Identity))
-                                .map_err::<BmailError, _>(Into::into)?;
-                            reader
-                                .read_to_end(&mut decrypted)
-                                .map_err::<BmailError, _>(Into::into)?;
-
-                            decrypted
-                        };
-
-                        let message_struct = BMessage {
-                            created_at: post.created_at,
-                            raw_message: message.to_string(),
-                            message:
-                                String::from_utf8(decrypted)
-                                    .map_err::<BmailError, _>(Into::into)?,
-                            creator: sender.did,
-                        };
+                // println!("{bmail:?}");
+                if bmail.bmail_type.is_some() {
+                    println!("\n\nFOUND A BMAIL!\n\n");
+                    if let Some(cipher_text) = bmail.bmail_cipher_text {
                         tx.send(message_struct)
                             .await
                             .map_err::<BmailError, _>(Into::into)?;

@@ -1,6 +1,9 @@
-use age::{x25519::{Identity, Recipient}, Recipient as RecipientTrait};
-use bisky::lexicon::{app::bsky::feed::Post, com::atproto::repo::Record};
-use chrono::Utc;
+use age::{
+    x25519::{Identity, Recipient},
+    Recipient as RecipientTrait,
+};
+use bisky::lexicon::{app::bsky::feed::{Post, Like}, com::atproto::repo::{Record, StrongRef}};
+use chrono::{TimeZone, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
     backend::Backend,
@@ -11,15 +14,16 @@ use ratatui::{
     Frame, Terminal,
 };
 use regex::Regex;
-use std::{io::Write, str::FromStr};
+use std::{collections::HashMap, io::Write, str::FromStr};
 use tokio::sync::mpsc::Receiver;
 use unicode_width::UnicodeWidthStr;
+use uuid::Uuid;
 
 use crate::{
     conf::Settings,
     errors::BmailError,
-    message::{ConversationPortion, Message, BmailEnabledProfile},
-    SharableBluesky,
+    message::{BmailEnabledProfile, BmailMessageRecord, Conversation, DecryptedMessage, BmailLike},
+    SharableBluesky, key::get_recipient_for_bskyer,
 };
 
 pub enum InputMode {
@@ -47,9 +51,9 @@ pub struct App {
     /// The currently active Conversation
     pub current_recipient: Option<Vec<Recipient>>,
     /// Channel for Receiving Messages
-    pub message_rx: Option<Receiver<Message>>,
-    /// Storage Medium for ConversationPortions 
-    pub conversations: Vec<ConversationPortion>,
+    pub message_rx: Option<Receiver<DecryptedMessage>>,
+    /// Storage Medium for ConversationPortions
+    pub conversations: HashMap<Uuid, Conversation>,
     /// App Settings
     pub conf: Settings,
     /// The DID of the current user
@@ -57,20 +61,26 @@ pub struct App {
 }
 
 impl App {
-
-    /// Initialize profile 
-    pub async fn initialize(&mut self) -> Result<(), BmailError>{
+    /// Initialize profile
+    pub async fn initialize(&mut self) -> Result<(), BmailError> {
         //Get Profile and check for existence of key
         let profile_record = {
             let mut bsky = self.bluesky.0.write().await;
             let mut user = bsky.user(&self.conf.user.handle)?;
-            user.get_record::<BmailEnabledProfile>(&self.conf.user.handle, "app.bsky.actor.profile", "self").await?
+            user.get_record::<BmailEnabledProfile>(
+                &self.conf.user.handle,
+                "app.bsky.actor.profile",
+                "self",
+            )
+            .await?
         };
-        if profile_record.value.bmail_pub_key.is_none(){
+        if profile_record.value.bmail_pub_key.is_none() {
             self.upload_bmail_recipient().await?;
         }
+        if profile_record.value.bmail_notification_uri.is_none() {
+            self.create_notification_post().await?;
+        }
         Ok(())
-
     }
     /// Scrape the recipient's Profile for their Public Key so we can encrypt this thing
     pub async fn get_recipient_for_bskyer(
@@ -80,22 +90,70 @@ impl App {
         let mut bsky = self.bluesky.0.write().await;
         let mut user = bsky.user(&self.conf.user.handle)?;
 
-        let profile_record = user.get_record::<BmailEnabledProfile>(handle, "app.bsky.actor.profile", "self").await?;
-        let recipient = match &profile_record.value.bmail_pub_key{
-            Some(k) =>  Some(Recipient::from_str(k).map_err(|_| BmailError::ParseRecipientError)?),
-            None => None
+        let profile_record = user
+            .get_record::<BmailEnabledProfile>(handle, "app.bsky.actor.profile", "self")
+            .await?;
+        let recipient = match &profile_record.value.bmail_pub_key {
+            Some(k) => Some(Recipient::from_str(k).map_err(|_| BmailError::ParseRecipientError)?),
+            None => None,
         };
         Ok((recipient, profile_record))
     }
 
-    /// Create a BmailEnabledProfile Profile Record to store your Recipient. 
-    pub async fn upload_bmail_recipient(&mut self) -> Result<(), BmailError>{
+    /// Create an extremely old post that can be liked to indicate you have a new Bmail
+    pub async fn create_notification_post(&mut self) -> Result<(), BmailError> {
+        let handle = &self.conf.user.handle.clone();
+
+        let notif_post = {
+            let mut bsky = self.bluesky.0.write().await;
+            let mut me = bsky.me()?;
+            me
+            .create_record(
+                "app.bsky.feed.post",
+                None,
+                None,
+                None,
+                Post {
+                    rust_type: Some("app.bsky.feed.post".to_string()),
+                    text: "You've got Bmail".to_string(),
+                    created_at: Utc.with_ymd_and_hms(1970, 0, 0, 0, 0, 0).unwrap(),
+                    embed: None,
+                    reply: None,
+                },
+            )
+            .await
+            .unwrap()}; //Get existing Record so we can only change one thing
+        
+        let (_recipient, mut profile_record) = match self.get_recipient_for_bskyer(handle).await {
+            Ok(r) => r,
+            Err(_) => return Err(BmailError::InternalServerError),
+        };
+
+        profile_record.value.bmail_notification_uri = Some(notif_post.uri);
+        profile_record.value.bmail_notification_cid = Some(notif_post.cid);
+
+        let mut bsky = self.bluesky.0.write().await;
+        bsky.me()?.put_record(
+            "app.bsky.actor.profile",
+            "self",
+            None,
+            None,
+            Some(&profile_record.cid),
+            &profile_record.value,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    /// Create a BmailEnabledProfile Profile Record to store your Recipient.
+    pub async fn upload_bmail_recipient(&mut self) -> Result<(), BmailError> {
         let handle = &self.conf.user.handle.clone();
 
         //Get existing Record so we can only change one thing
-        let (recipient, mut profile_record) = match self.get_recipient_for_bskyer(handle).await{
+        let (_recipient, mut profile_record) = match self.get_recipient_for_bskyer(handle).await {
             Ok(r) => r,
-            Err(r) => return Err(BmailError::InternalServerError),
+            Err(_) => return Err(BmailError::InternalServerError),
         };
 
         //Update pub key
@@ -103,70 +161,82 @@ impl App {
 
         let mut bsky = self.bluesky.0.write().await;
         let mut me = bsky.me()?;
-        me.put_record("app.bsky.actor.profile", "self", None, None, Some(&profile_record.cid), &profile_record.value).await?;
-        
+        me.put_record(
+            "app.bsky.actor.profile",
+            "self",
+            None,
+            None,
+            Some(&profile_record.cid),
+            &profile_record.value,
+        )
+        .await?;
+
         Ok(())
-
     }
-    /// Send a Bmail by adding your message to your ConversationPortion in your profile Record
-    pub async fn send_bmail(&mut self, recipients: Vec<&str>, msg: &str) -> Result<(), BmailError> {
-        
-        let recipient_keys = {
-            let mut keys: Vec<Box<dyn RecipientTrait + Send>> = Vec::with_capacity(recipients.len());
-            for recipient in recipients{
-                let (recipient_key, _profile_record) = self.get_recipient_for_bskyer(recipient).await?; 
-                if let Some(key) = recipient_key{
-                    keys.push(Box::new(key));
-                } else{
-                    return Err(BmailError::MissingRecipient(recipient.to_string()))
-                }
+
+    /// Notify Recipients they have a Bmail by liking their bmail notification post
+    pub async fn notify_recipients(&mut self, conversation_id: Uuid, recipients: Vec<String>) -> Result<(), BmailError>{
+            for recipient in recipients.iter() {
+                let (_recipient_key, profile_record) =
+                    get_recipient_for_bskyer(self.bluesky.clone(), recipient).await?;
+                    let mut bsky = self.bluesky.0.write().await;
+                    let mut me = bsky.me().map_err::<BmailError, _>(Into::into)?;
+                    me
+                    .create_record(
+                        "app.bsky.feed.like",
+                        None,
+                        None,
+                        None,
+                        BmailLike {
+                            subject: StrongRef{
+                                cid: profile_record.value.bmail_notification_cid.ok_or_else(||BmailError::MalformedBmail)?,
+                                uri: profile_record.value.bmail_notification_uri.ok_or_else(||BmailError::MalformedBmail)?,
+                            },
+                            created_at: Utc::now(),
+                            bmail_recipients: recipients.clone(),
+                            bmail_conversation_id: conversation_id,
+                        }
+                    )
+                    .await?;
             };
-            keys
-        };
+            Ok(())
+    }
 
-        let mut bsky = self.bluesky.0.write().await;
-        let me = bsky.me().map_err::<BmailError, _>(Into::into)?;
-        println!("Message Size: {}", msg.len());
-        println!("Message Char Count: {}", msg.chars().count());
+    /// Send a Bmail by adding your message to your ConversationPortion in your profile Record
+    pub async fn send_bmail(
+        &mut self,
+        conversation_id: Uuid,
+        recipients: Vec<String>,
+        msg: &str,
+    ) -> Result<(), BmailError> {
+        // println!("Message Size: {}", msg.len());
+        // println!("Message Char Count: {}", msg.chars().count());
 
-        // Encrypt the plaintext to a ciphertext...
-        let encryptor = age::Encryptor::with_recipients(recipient_keys)
-            .expect("we provided a recipient");
-
-        let mut encrypted = vec![];
-        let mut writer = encryptor
-            .wrap_output(&mut encrypted)
-            .map_err::<BmailError, _>(Into::into)?;
-        writer.write_all(msg.as_bytes())?;
-        writer.finish()?;
-        println!("Number of Bytes: {}", encrypted.len());
-
-        use base64::{engine::general_purpose, Engine as _};
-        let encoded: String = general_purpose::STANDARD_NO_PAD.encode(&encrypted);
-        // Construct Dm
-        // //dm::@recipient::message
-        // .len() is number of bytes NOT # of chars.
-        // let dm: String = format!("//dm::@{}::{:?}", recipient, encoded);
-        // println!("DM: {}", dm);
-        println!("Length: {}", encoded.chars().count());
-
-        // let encoded2 = base2048::encode(&encrypted);
-        // let dm2 = format!("//dm::@{}::{:?}", recipient, encoded2);
-
-        // println!("DM2048: {}", dm2);
-        // println!("Length2048: {}", dm2.chars().count());
         let Some(user_did) = &self.user_did else {
             return Err(BmailError::InternalServerError)
         };
         // Create Message
-        let msg = Message{
+        let msg = DecryptedMessage {
             created_at: Utc::now(),
             creator: user_did.clone(),
-            raw_message: msg.to_string(),
-            message: encoded,
+            message: msg.to_string(),
+            conversation_id,
+            recipients: recipients.clone(),
+            version: 0,
         };
-        // Add Message to ConversationPortion
-        // Upload Conversation portion
+        let record = msg
+            .into_bmail_record(self.bluesky.clone(), &self.identity)
+            .await?;
+        // Send Bmail by creating a profile post with the contents
+         {
+            let mut bsky = self.bluesky.0.write().await;
+            let mut me = bsky.me().map_err::<BmailError, _>(Into::into)?;
+            me.create_record("app.bsky.actor.profile", None, None, None, record).await?;
+        };
+        // Notify recipients that we have sent them a Bmail
+        self.notify_recipients(conversation_id, recipients).await?;
+      
+
         Ok(())
     }
 }
@@ -182,7 +252,7 @@ impl Default for App {
             identity: Identity::generate(),
             message_rx: None,
             status: "ALL GOOD".to_string(),
-            conversations: vec![ConversationPortion::default()],
+            conversations: HashMap::new(),
             conf: Settings::default(),
             current_recipient: None,
             user_did: None,
@@ -300,7 +370,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
                 Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" to stop Editing, "),
                 Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw("to change conversation, "),
+                Span::raw(" to change conversation, "),
                 Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" to send the message"),
             ],
