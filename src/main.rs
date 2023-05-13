@@ -1,11 +1,10 @@
-use age::x25519::Identity;
 use bisky::atproto::{ClientBuilder, UserSession};
 use bisky::firehose::cbor::Body as FirehoseBody;
 use bisky::storage::File;
-use bmail::conf::{get_configuration, Settings};
+use bmail::conf::get_configuration;
 use bmail::errors::BmailError;
 use bmail::key::get_identity;
-use bmail::message::{BmailMessageRecord, DecryptedMessage};
+use bmail::message::{BmailMessageRecord, FirehoseMessages, BmailLike};
 use bmail::ui::{run_app, App};
 use bmail::SharableBluesky;
 use crossterm::{
@@ -15,8 +14,8 @@ use crossterm::{
 };
 use futures::StreamExt as _;
 use ratatui::{backend::CrosstermBackend, Terminal};
-use std::io;
-use std::io::{Cursor, Read};
+use serde_cbor::value::from_value;
+use std::io::{self, Cursor};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -24,6 +23,7 @@ use tokio::sync::mpsc::{self, Sender};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
+use serde_cbor::Value::Text;
 
 #[tokio::main]
 async fn main() -> Result<(), BmailError> {
@@ -72,7 +72,7 @@ async fn main() -> Result<(), BmailError> {
         bluesky: bsky.clone(),
         identity: identity.clone(),
         message_rx: Some(rx),
-        user_did: Some(user_did),
+        user_did: Some(user_did.clone()),
         conf: conf.clone(),
         ..Default::default()
     };
@@ -84,7 +84,7 @@ async fn main() -> Result<(), BmailError> {
     // A new task is spawned for processing firehose messages. The socket is
     // moved to the new task and processed there.
     let _firehose = tokio::spawn(async move {
-        let _ = process_message(socket, tx, bsky.clone(), identity.clone(), conf).await;
+        let _ = process_message(socket, tx, user_did).await;
     });
 
     // firehose.await.unwrap();
@@ -116,20 +116,17 @@ async fn main() -> Result<(), BmailError> {
 
 pub async fn process_message(
     mut socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
-    tx: Sender<DecryptedMessage>,
-    bsky: SharableBluesky,
-    identity: Identity,
-    conf: Settings,
+    tx: Sender<FirehoseMessages>,
+    user_did: String,
 ) -> Result<(), BmailError> {
     while let Some(Ok(Message::Binary(message))) = socket.next().await {
-        let mut bsky = bsky.0.write().await;
         let (_header, body) = bisky::firehose::cbor::read(&message).unwrap();
         if let FirehoseBody::Commit(commit) = body {
             if commit.operations.is_empty() {
                 continue;
             }
             let operation = &commit.operations[0];
-            if !operation.path.starts_with("app.bsky.feed.post/") {
+            if !operation.path.starts_with("app.bsky.actor.profile/") || !operation.path.starts_with("app.bsky.notification.like/") {
                 continue;
             }
             if let Some(cid) = operation.cid {
@@ -138,17 +135,34 @@ pub async fn process_message(
                 let car_blocks = bisky::firehose::car::read_blocks(&mut car_reader).unwrap();
 
                 let record_reader = Cursor::new(car_blocks.get(&cid).unwrap());
-                let bmail = serde_cbor::from_reader::<serde_cbor::Value, _>(record_reader)
-                    .map_err::<BmailError, _>(Into::into)?;
-                // println!("{bmail:?}");
-                if bmail.bmail_type.is_some() {
-                    println!("\n\nFOUND A BMAIL!\n\n");
-                    if let Some(cipher_text) = bmail.bmail_cipher_text {
-                        tx.send(message_struct)
+                let value = serde_cbor::from_reader::<serde_cbor::Value, _>(record_reader)
+                    .map_err::<BmailError, _>(Into::into);
+
+                match &value {
+                    Ok(serde_cbor::Value::Map(r)) =>  {
+                        if r.get(&Text("bmail_type".to_string())) == Some(&Text("bmail".to_string())){
+                            println!("Found Bmail Message");
+                            let bmail: BmailMessageRecord = from_value(value.unwrap()).unwrap();
+                            if bmail.bmail_recipients.contains(&user_did){
+                                tx.send(FirehoseMessages::Bmail(bmail))
+                                .await
+                                .map_err::<BmailError, _>(Into::into)?;
+                            }
+
+                        }
+                        else if r.get(&Text("bmail_type".to_string())) == Some(&Text("notification".to_string())){
+                            println!("Found New Bmail Notification");
+                            let notif: BmailLike = from_value(value.unwrap()).unwrap();
+                            tx.send(FirehoseMessages::BmailLike(notif))
                             .await
                             .map_err::<BmailError, _>(Into::into)?;
-                    }
-                }
+                        }
+                    },
+                    Err(_) => (),
+                    _ => ()
+            };
+           
+
             }
         }
     }

@@ -1,3 +1,4 @@
+#![feature(drain_filter)]
 use std::sync::Arc;
 
 use bisky::{atproto::Client, bluesky::Bluesky, lexicon::app::bsky::actor::ProfileViewDetailed};

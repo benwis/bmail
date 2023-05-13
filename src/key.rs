@@ -1,6 +1,10 @@
 use age::secrecy::ExposeSecret;
-use age::x25519::{Identity, Recipient};
+use age::{x25519::{Identity, Recipient}, Recipient as RecipientTrait};
+use base64::Engine;
+use base64::engine::general_purpose;
 use bisky::lexicon::com::atproto::repo::Record;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::{path::PathBuf, str::FromStr};
@@ -41,7 +45,7 @@ pub async fn get_recipient_for_bskyer(
     handle: &str,
 ) -> Result<(Option<Recipient>, Record<BmailEnabledProfile>), BmailError> {
     let mut bsky = bsky.0.write().await;
-    let mut user = bsky.user(&handle)?;
+    let mut user = bsky.user(handle)?;
 
     let profile_record = user
         .get_record::<BmailEnabledProfile>(handle, "app.bsky.actor.profile", "self")
@@ -52,30 +56,55 @@ pub async fn get_recipient_for_bskyer(
     };
     Ok((recipient, profile_record))
 }
-// /// Process Recipient Identity from a an actor.profile Record
-// pub fn process_profile_records_for_identity(records: Vec<Record<BmailInfo>>) -> Result<Recipient, BmailError>{
-//     let mut pub_key = None;
-//     for record in records{
-//         if record.value.bmail_type == "bmail_pubkey" && pub_key.is_none(){
-//             pub_key = match record.value.bmail_pub_key{
-//                 Some(k) => {
-//                     println!("Found Public Key: {}", &k);
-//                     Some(k)
-//                 },
-//                 None => return Err(BmailError::MissingRecipientIdentity)
-//             };
-//         } else if record.value.bmail_type == "bmail_pubkey" && pub_key.is_some(){
-//             // Which should we use Bob? Gee, I don't know. Somebody fucked up
-//             return Err(BmailError::MultipleRecipientKeys)
-//         }
-//     }
 
-//     if let Some(pub_key) = pub_key{
-//     let recipient =
-//         Recipient::from_str(&pub_key).map_err(|_| BmailError::ParseRecipientError)?;
-//     Ok(recipient)
-//     } else {
-//         Err(BmailError::MissingRecipientIdentity)
-//     }
+/// CBORify, Encrypt with age, and base64 encode some data to be passed around to certain recipients
+pub async fn encrypt_and_encode<T>(recipients: Vec<Box<dyn RecipientTrait + Send>>, payload: T) -> Result<String, BmailError>
+    where T: Serialize {
+    
+    //Stores cbored data
+    let mut cbor_buffer: Vec<u8> = Vec::new();
+    // Write payload into cbor_futter as cbor
+    ciborium::ser::into_writer(&payload, &mut cbor_buffer)?;
+    // Encrypt the plaintext to a ciphertext...
+    let encryptor =
+        age::Encryptor::with_recipients(recipients).expect("we provided a recipient");
 
-// }
+    let mut encrypted = vec![];
+    let mut writer = encryptor
+        .wrap_output(&mut encrypted)
+        .map_err::<BmailError, _>(Into::into)?;
+    writer.write_all(cbor_buffer.as_slice())?;
+    writer.finish()?;
+    println!("Number of Bytes: {}", encrypted.len());
+
+    let encoded: String = general_purpose::STANDARD_NO_PAD.encode(&encrypted);
+    Ok(encoded)
+
+}
+/// base64 decode, Decrypt with private key, and then decode from CBOR some data
+pub async fn decrypt_and_decode<T>(identity: &Identity, payload: &str) -> Result<T, BmailError> 
+where T: DeserializeOwned{
+    let decoded = general_purpose::STANDARD_NO_PAD.decode(payload)?;
+
+    // Decrypt Binary data
+    let decrypted = {
+        let decryptor = match age::Decryptor::new(decoded.as_slice())
+            .map_err::<BmailError, _>(Into::into)?
+        {
+            age::Decryptor::Recipients(d) => d,
+            _ => unreachable!(),
+        };
+
+        let mut decrypted = vec![];
+        let mut reader = decryptor
+            .decrypt(std::iter::once(identity as &dyn age::Identity))
+            .map_err::<BmailError, _>(Into::into)?;
+        reader
+            .read_to_end(&mut decrypted)
+            .map_err::<BmailError, _>(Into::into)?;
+
+        decrypted
+    };
+    Ok(ciborium::de::from_reader(decrypted.as_slice())?)
+
+}
