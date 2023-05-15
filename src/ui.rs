@@ -1,8 +1,6 @@
-use age::{
-    x25519::{Identity, Recipient},
-};
+use age::x25519::{Identity, Recipient};
 use bisky::lexicon::{
-    app::bsky::feed:: Post,
+    app::bsky::feed::Post,
     com::atproto::repo::{Record, StrongRef},
 };
 use chrono::{TimeZone, Utc};
@@ -12,19 +10,25 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Span, Spans, Text},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
-use std::{collections::HashMap, str::FromStr};
-use tokio::sync::mpsc::{Receiver, error::TryRecvError};
+use std::{
+    collections::{BTreeMap, HashMap},
+    str::FromStr,
+};
+use tokio::sync::mpsc::{error::TryRecvError, Receiver};
 use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
 use crate::{
     conf::Settings,
     errors::BmailError,
-    key::get_recipient_for_bskyer,
-    message::{BmailEnabledProfile, BmailLike, Conversation, DecryptedMessage, FirehoseMessages, insert_with_collisions},
+    key::{decrypt_and_decode, encrypt_and_encode, get_recipient_for_bskyer},
+    message::{
+        insert_with_collisions, BmailEnabledProfile, BmailLike, Conversation, DecryptedMessage,
+        FirehoseMessages,
+    },
     SharableBluesky,
 };
 
@@ -32,6 +36,7 @@ pub enum InputMode {
     Normal,
     Editing,
     EditingRecipient,
+    ScrollingMessages,
 }
 
 /// App holds the state of the application
@@ -44,8 +49,6 @@ pub struct App {
     pub status: String,
     /// Current input mode
     pub input_mode: InputMode,
-    /// History of recorded messages
-    pub messages: Vec<String>,
     /// Bluesky object for API Calls
     pub bluesky: SharableBluesky,
     /// Identity for Decrypting DMs
@@ -54,6 +57,9 @@ pub struct App {
     pub current_conversation_id: Option<Uuid>,
     /// Storage Medium for Conversations.
     pub conversations: HashMap<Uuid, Conversation>,
+    /// Current state of the conversation
+    pub conversation_state: ListState,
+    /// Maps recipient DIDs to a specific Conversation UUID
     pub recipients_conversation_map: HashMap<Vec<String>, Uuid>,
     /// Channel for Receiving Messages
     pub message_rx: Option<Receiver<FirehoseMessages>>,
@@ -77,24 +83,31 @@ impl App {
             )
             .await?
         };
-        
+
         if profile_record.value.bmail_pub_key.is_none() {
             self.upload_bmail_recipient().await?;
         }
         if profile_record.value.bmail_notification_uri.is_none() {
             self.create_notification_post().await?;
         }
+        //TODO Get Conversation IDs and Recipient Lists from Profile(encrypted)
 
         Ok(())
     }
     /// Load a conversation. If there is a conversation with the recipients in memory, display messages. If there isn't one,
-    /// check the profile self storage for a conversation that matches. If that fails, create a new conversation and upload it 
+    /// check the profile self storage for a conversation that matches. If that fails, create a new conversation and upload it
     /// to the profile storage. This takes handles from the UI, so they'll be parsed into DIDs
-    pub async fn load_conversation(&mut self, recipients: Vec<String>) -> Result<(), BmailError>{
+    pub async fn load_conversation(
+        &mut self,
+        mut recipients: Vec<String>,
+    ) -> Result<Uuid, BmailError> {
+        // 0. Add myself to the participants
+        recipients.push(self.conf.user.handle.clone());
+        //println!("RECIPIENTS: {:?}", recipients);
+
         // 1. Get DIDs for recipients
-        let recipient_dids = {
-            let mut dids: Vec<String> =
-                Vec::with_capacity(recipients.len());
+        let participant_dids = {
+            let mut dids: Vec<String> = Vec::with_capacity(recipients.len());
             let mut bsky = self.bluesky.0.write().await;
             let mut user = bsky.user(&self.conf.user.handle)?;
             for recipient in &recipients {
@@ -103,35 +116,184 @@ impl App {
             }
             dids
         };
+        //println!("DIDS: {:?}", participant_dids);
 
         // 2. Check if all DIDs are present in Conversation Storage as a key
         let mut conversation_id = None;
-        for conversation in self.recipients_conversation_map.iter(){
-            match conversation.0.iter().all(|item| recipient_dids.contains(item)){
+        for conversation in self.recipients_conversation_map.iter() {
+            match conversation
+                .0
+                .iter()
+                .all(|item| participant_dids.contains(item))
+            {
                 true => {
                     conversation_id = Some(*conversation.1);
-                    break
-                },
+                    break;
+                }
                 false => continue,
             };
         }
-        // 3. If conversation_id exists, set currently active conversation ID. Else, create a new one
-        if let Some(active_conversation_id) = conversation_id{
+        // 3. If conversation_id exists, set currently active conversation ID.
+        if let Some(active_conversation_id) = conversation_id {
             self.current_conversation_id = Some(active_conversation_id);
-        } else {
+        }
+        // Else if, check if present in profile storage.
+        else if let Ok(Some(c_id)) = self
+            .get_cid_from_rc_map_from_profile(participant_dids.clone())
+            .await
+        {
+            self.current_conversation_id = Some(c_id);
+        }
+        // Else create a new one
+        else {
             let new_conversation_id = Uuid::new_v4();
             self.current_conversation_id = Some(new_conversation_id);
-            self.recipients_conversation_map.insert(recipient_dids.clone(), new_conversation_id);
+            self.recipients_conversation_map
+                .insert(participant_dids.clone(), new_conversation_id);
+            // Create a new conversation
+            let new_conversation = Conversation {
+                conversation_id: new_conversation_id,
+                messages: BTreeMap::default(),
+                recipient_active_time: HashMap::default(),
+                participants: participant_dids.clone(),
+            };
+            self.conversations
+                .insert(new_conversation_id, new_conversation);
+
+            self.upload_rc_map_to_profile(participant_dids.clone(), new_conversation_id)
+                .await?;
         }
 
         // 4. Get all Conversation Records with that Conversation ID from each participant
         // 4.1 Check latest on server vs latest in memory(last entry)
         // 4.2 If server has newer messages, add missing to memory conversation
-        if let Some(c_id) = self.current_conversation_id{
-        if let Some(conversation) = self.conversations.get_mut(&c_id){
-            conversation.update_with_messages_from_participants(self.bluesky.clone(), &self.conf.user.handle, &self.identity, recipient_dids).await?;
+        if let Some(c_id) = self.current_conversation_id {
+            // Create the conversation entry to update if it does not exist
+            self.conversations
+                .entry(c_id)
+                .or_insert_with(|| Conversation {
+                    conversation_id: c_id,
+                    participants: participant_dids.clone(),
+                    ..Default::default()
+                });
+            // This should always be true, because we create it above
+            if let Some(conversation) = self.conversations.get_mut(&c_id) {
+                conversation
+                    .update_with_messages_from_participants(
+                        self.bluesky.clone(),
+                        &self.conf.user.handle,
+                        &self.identity,
+                        participant_dids,
+                    )
+                    .await?;
+
+                // Set Conversation state of conversation
+                self.conversation_state = ListState::default();
+            }
+        }
+
+        Ok(self.current_conversation_id.unwrap())
+    }
+
+    /// We're storing a HashMap of recipients in a Conversation to conversation IDs in the profile(encrypted)
+    /// so that multiple clients can fetch them, and so that we can recover them when the app is restarted.
+    /// Get that Hashmap
+    pub async fn get_rc_map_from_profile(
+        &mut self,
+    ) -> Result<Option<HashMap<Vec<String>, Uuid>>, BmailError> {
+        let mut bsky = self.bluesky.0.write().await;
+        let mut user = bsky.user(&self.conf.user.handle)?;
+        let profile_record = user
+            .get_record::<BmailEnabledProfile>(
+                &self.conf.user.handle,
+                "app.bsky.actor.profile",
+                "self",
+            )
+            .await?;
+
+        if let Some(r_map) = &profile_record.value.bmail_rc_map {
+            let r_map = decrypt_and_decode(&self.identity, r_map).await?;
+            Ok(Some(r_map))
+        } else {
+            Ok(None)
         }
     }
+
+    /// We're storing a HashMap of recipients in a Conversation to conversation IDs in the profile(encrypted)
+    /// so that multiple clients can fetch them, and so that we can recover them when the app is restarted.
+    /// Get that Hashmap
+    pub async fn get_cid_from_rc_map_from_profile(
+        &mut self,
+        participants: Vec<String>,
+    ) -> Result<Option<Uuid>, BmailError> {
+        let profile_rc_map = self.get_rc_map_from_profile().await?;
+
+        if let Some(rc_map) = &profile_rc_map {
+            let mut conversation_id = None;
+            for keys in rc_map.keys() {
+                // Need to check length because we might have one vector contain all of another
+                match keys.iter().all(|item| participants.contains(item)) && participants.len() == keys.len() {
+                    true => {
+                        let c_id = rc_map.get(keys).unwrap();
+                        //println!("FOUND KEYS: {:#?}", keys);
+                        conversation_id = Some(*c_id);
+                        break;
+                    }
+                    false => continue,
+                };
+            }
+            Ok(conversation_id)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get the current rc_map from profile and add a new value to it
+    pub async fn upload_rc_map_to_profile(
+        &mut self,
+        key: Vec<String>,
+        value: Uuid,
+    ) -> Result<(), BmailError> {
+        let handle = self.conf.user.handle.clone();
+
+        //Get existing Record so we can only change one thing
+        let (_recipient, mut profile_record) = match self.get_recipient_for_bskyer(&handle).await {
+            Ok(r) => r,
+            Err(_) => return Err(BmailError::InternalServerError),
+        };
+
+        // Create Recipient from stored Identity for Myself
+        let my_recipient = self.identity.to_public();
+
+        let rc_map = match profile_record.value.bmail_rc_map {
+            Some(m) => {
+                let mut rc_map: HashMap<Vec<String>, Uuid> =
+                    decrypt_and_decode(&self.identity, &m).await?;
+                rc_map.insert(key, value);
+                // Myself only target here
+                encrypt_and_encode(vec![Box::new(my_recipient)], rc_map).await?
+            }
+            None => {
+                let mut new_rc_map = HashMap::new();
+                new_rc_map.insert(key, value);
+                encrypt_and_encode(vec![Box::new(my_recipient)], new_rc_map).await?
+            }
+        };
+
+        profile_record.value.bmail_rc_map = Some(rc_map);
+
+        let mut bsky = self.bluesky.0.write().await;
+        let mut me = bsky.me()?;
+        me.put_record(
+            "app.bsky.actor.profile",
+            "self",
+            None,
+            None,
+            Some(&profile_record.cid),
+            &profile_record.value,
+        )
+        .await?;
+
         Ok(())
     }
 
@@ -267,13 +429,17 @@ impl App {
     }
 
     /// Add a single Bmail message to the Conversation
-    pub fn add_bmail_to_conversation(&mut self, conv_id: Uuid, msg: &DecryptedMessage) -> Result<(), BmailError>{
-        match self.conversations.get_mut(&conv_id){
+    pub fn add_bmail_to_conversation(
+        &mut self,
+        conv_id: Uuid,
+        msg: &DecryptedMessage,
+    ) -> Result<(), BmailError> {
+        match self.conversations.get_mut(&conv_id) {
             Some(c) => {
                 insert_with_collisions(&mut c.messages, msg);
                 Ok(())
-            },
-            None => Err(BmailError::ConversationNotFound)
+            }
+            None => Err(BmailError::ConversationNotFound),
         }
     }
 
@@ -298,10 +464,9 @@ impl App {
             conversation_id,
             recipients: recipients.clone(),
             version: 0,
+            creator_handle: self.conf.user.handle.clone(),
         };
-        let record = msg
-            .into_bmail_record(self.bluesky.clone())
-            .await?;
+        let record = msg.into_bmail_record(self.bluesky.clone()).await?;
         // Send Bmail by creating a profile post with the contents
         {
             let mut bsky = self.bluesky.0.write().await;
@@ -310,7 +475,13 @@ impl App {
                 .await?;
         };
         // Add the decrypted message to the Conversation
-        self.add_bmail_to_conversation(conversation_id, &msg)?;
+        match self.add_bmail_to_conversation(conversation_id, &msg) {
+            Ok(_) => (),
+            Err(BmailError::ConversationNotFound) => {
+                self.status = "Failed to find conversation".to_string()
+            }
+            Err(e) => self.status = format!("Unexpected_error: {}", e.to_string()),
+        };
         // Notify recipients that we have sent them a Bmail
         self.notify_recipients(conversation_id, recipients).await?;
 
@@ -324,7 +495,6 @@ impl Default for App {
             input: String::new(),
             recipient: String::new(),
             input_mode: InputMode::Normal,
-            messages: Vec::new(),
             bluesky: SharableBluesky::default(),
             identity: Identity::generate(),
             message_rx: None,
@@ -334,6 +504,7 @@ impl Default for App {
             user_did: None,
             current_conversation_id: None,
             recipients_conversation_map: HashMap::new(),
+            conversation_state: ListState::default(),
         }
     }
 }
@@ -345,27 +516,31 @@ pub async fn run_app<B: Backend>(
     loop {
         // Read messages on the channel and process them. Should work ok unless you're under
         // an absolute deluge. TODO: Be smarter about reading these messages
-        if let Some(rx) = &mut app.message_rx{
-            match &rx.try_recv(){
+        if let Some(rx) = &mut app.message_rx {
+            match &rx.try_recv() {
                 Ok(m) => match m {
                     FirehoseMessages::Bmail(m) => {
-                       let msg =  m.into_decrypted_message(&app.identity).await?;
-                       app.add_bmail_to_conversation(msg.conversation_id, &msg)?;
-                    },
+                        println!("FOUND BMAIL");
+                        let msg = m.into_decrypted_message(&app.identity).await?;
+                        app.add_bmail_to_conversation(msg.conversation_id, &msg)?;
+                    }
                     FirehoseMessages::BmailLike(_l) => (),
                 },
                 Err(TryRecvError::Empty) => (),
                 Err(_) => return Err(BmailError::FirehoseProcessCrashed),
             }
-    }
+        }
 
-        terminal.draw(|f| ui(f, &app))?;
+        terminal.draw(|f| ui(f, &mut app))?;
 
         if let Event::Key(key) = event::read()? {
             match app.input_mode {
                 InputMode::Normal => match key.code {
                     KeyCode::Char('e') => {
                         app.input_mode = InputMode::Editing;
+                    }
+                    KeyCode::Char('m') => {
+                        app.input_mode = InputMode::ScrollingMessages;
                     }
                     KeyCode::Tab => {
                         app.input_mode = InputMode::EditingRecipient;
@@ -377,12 +552,23 @@ pub async fn run_app<B: Backend>(
                 },
                 InputMode::Editing if key.kind == KeyEventKind::Press => match key.code {
                     KeyCode::Enter => {
-                        //TODO: Create and Send Bmail
-                        // let recipient_input = &app.recipient.clone();
-                        // let msg = &app.input.clone();
-
-                        // app.send_bmail(recipients, msg).await?;
-                        app.messages.push(app.input.drain(..).collect());
+                        let Some(c_id) = &app.current_conversation_id else{
+                            app.status = "No conversation is active".to_string();
+                            continue
+                        };
+                        let recipients_input = &app.recipient;
+                        let recipients =
+                            recipients_input.split(',').map(|s| s.to_string()).collect();
+                        let input = app.input.clone();
+                        match app.send_bmail(*c_id, recipients, &input).await {
+                            Ok(_) => (),
+                            Err(BmailError::MissingRecipient(r)) => {
+                                app.status = format!("Recipient {} is not using Bmail", r)
+                            }
+                            Err(e) => {
+                                app.status = format!("Unexpected Error: {:#?}", e.to_string())
+                            }
+                        };
                     }
                     KeyCode::Char(c) => {
                         app.input.push(c);
@@ -412,7 +598,53 @@ pub async fn run_app<B: Backend>(
                         app.input_mode = InputMode::EditingRecipient;
                     }
                     KeyCode::Enter => {
-                        //TODO: Get public key of new recipient and display success failure. Load old messages maybe.
+                        let recipients_input = &app.recipient;
+                        let recipients =
+                            recipients_input.split(',').map(|s| s.to_string()).collect();
+                        match app.load_conversation(recipients).await {
+                            Ok(u) => app.status = format!("Loaded Conversation: {}", u),
+                            Err(e) => {
+                                app.status =
+                                    format!("Failed to load conversation: {:?}", e.to_string())
+                            }
+                        };
+                    }
+                    _ => {}
+                },
+                InputMode::ScrollingMessages if key.kind == KeyEventKind::Press => match key.code {
+                    KeyCode::Esc => {
+                        app.input_mode = InputMode::Normal;
+                    }
+                    KeyCode::Up => {
+                        if let Some(c_id) = app.current_conversation_id {
+                            let i = match app.conversation_state.selected() {
+                                Some(i) => {
+                                    if i == 0 {
+                                        app.conversations.get(&c_id).unwrap().messages.len() - 1
+                                    } else {
+                                        i - 1
+                                    }
+                                }
+                                None => 0,
+                            };
+                            app.conversation_state.select(Some(i));
+                        }
+                    }
+                    KeyCode::Down => {
+                        if let Some(c_id) = app.current_conversation_id {
+                            let i = match app.conversation_state.selected() {
+                                Some(i) => {
+                                    if i >= app.conversations.get(&c_id).unwrap().messages.len() - 1
+                                    {
+                                        0
+                                    } else {
+                                        i + 1
+                                    }
+                                }
+                                None => 0,
+                            };
+                            app.conversation_state.select(Some(i));
+                        }
                     }
                     _ => {}
                 },
@@ -422,7 +654,7 @@ pub async fn run_app<B: Backend>(
     }
 }
 
-fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
+fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(2)
@@ -452,7 +684,9 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
                 Span::styled("q", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" to exit, "),
                 Span::styled("e", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" to start typing message or choosing conversation."),
+                Span::raw(" to start typing a message, "),
+                Span::styled("m", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" to enter conversation scroll mode."),
             ],
             Style::default().add_modifier(Modifier::RAPID_BLINK),
         ),
@@ -480,6 +714,19 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
             ],
             Style::default(),
         ),
+        InputMode::ScrollingMessages => (
+            vec![
+                Span::raw("Press "),
+                Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" to stop Scrolling, "),
+                Span::styled(
+                    "Up/Dwn Arrow",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" to scroll messages, "),
+            ],
+            Style::default(),
+        ),
     };
     let mut text = Text::from(Spans::from(msg));
     text.patch_style(style);
@@ -491,6 +738,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
             InputMode::Normal => Style::default(),
             InputMode::Editing => Style::default(),
             InputMode::EditingRecipient => Style::default().fg(Color::Yellow),
+            InputMode::ScrollingMessages => Style::default(),
         })
         .block(
             Block::default()
@@ -502,25 +750,40 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
     let status = Paragraph::new(app.status.as_ref()).style(Style::default());
     f.render_widget(status, chunks[3]);
 
-    let messages: Vec<ListItem> = app
-        .messages
-        .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            let content = Spans::from(Span::raw(format!("{}: {}", i, m)));
-            ListItem::new(content)
-        })
-        .collect();
+    let messages: Vec<ListItem> = match app.current_conversation_id {
+        Some(c_id) => match app.conversations.get(&c_id) {
+            Some(c) => c
+                .messages
+                .iter()
+                .map(|(k, v)| {
+                    let content = Spans::from(Span::raw(format!(
+                        "{} {}: {}",
+                        k.created_at, v.creator, v.message
+                    )));
+                    ListItem::new(content)
+                })
+                .collect(),
+            None => Default::default(),
+        },
+        None => Vec::new(),
+    };
 
-    let messages =
-        List::new(messages).block(Block::default().borders(Borders::ALL).title("Messages"));
-    f.render_widget(messages, chunks[4]);
+    let messages = List::new(messages)
+        .style(match app.input_mode {
+            InputMode::Normal => Style::default(),
+            InputMode::Editing => Style::default(),
+            InputMode::EditingRecipient => Style::default(),
+            InputMode::ScrollingMessages => Style::default().fg(Color::Yellow),
+        })
+        .block(Block::default().borders(Borders::ALL).title("Messages"));
+    f.render_stateful_widget(messages, chunks[4], &mut app.conversation_state);
 
     let input = Paragraph::new(app.input.as_ref())
         .style(match app.input_mode {
             InputMode::Normal => Style::default(),
             InputMode::Editing => Style::default().fg(Color::Yellow),
             InputMode::EditingRecipient => Style::default(),
+            InputMode::ScrollingMessages => Style::default(),
         })
         .block(Block::default().borders(Borders::ALL).title("Input"));
     f.render_widget(input, chunks[5]);
@@ -547,5 +810,6 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
                 chunks[2].y + 1,
             )
         }
+        InputMode::ScrollingMessages => {}
     }
 }

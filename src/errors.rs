@@ -41,6 +41,8 @@ pub enum BmailError {
     CborDecodeError(#[from] ciborium::de::Error<std::io::Error>),
     #[error(transparent)]
     CborEncodeError(#[from] ciborium::ser::Error<std::io::Error>),
+    #[error(transparent)]
+    UuidError(#[from] uuid::Error),
     #[error("Tokio Send Error {0}")]
     TokioSendError(String),
     #[error("Stream Error")]
@@ -57,7 +59,7 @@ impl From<tokio::sync::mpsc::error::SendError<FirehoseMessages>> for BmailError 
     }
 }
 
-impl From<bisky::atproto::StreamError> for BmailError{
+impl From<bisky::atproto::StreamError> for BmailError {
     fn from(_value: bisky::atproto::StreamError) -> Self {
         Self::StreamError
     }

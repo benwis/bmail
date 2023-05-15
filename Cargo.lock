@@ -274,6 +274,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_cbor",
+ "serde_json",
  "thiserror",
  "tokio",
  "tokio-tungstenite",

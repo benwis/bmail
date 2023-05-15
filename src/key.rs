@@ -1,10 +1,13 @@
 use age::secrecy::ExposeSecret;
-use age::{x25519::{Identity, Recipient}, Recipient as RecipientTrait};
-use base64::Engine;
+use age::{
+    x25519::{Identity, Recipient},
+    Recipient as RecipientTrait,
+};
 use base64::engine::general_purpose;
+use base64::Engine;
 use bisky::lexicon::com::atproto::repo::Record;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::{path::PathBuf, str::FromStr};
@@ -58,16 +61,19 @@ pub async fn get_recipient_for_bskyer(
 }
 
 /// CBORify, Encrypt with age, and base64 encode some data to be passed around to certain recipients
-pub async fn encrypt_and_encode<T>(recipients: Vec<Box<dyn RecipientTrait + Send>>, payload: T) -> Result<String, BmailError>
-    where T: Serialize {
-    
+pub async fn encrypt_and_encode<T>(
+    recipients: Vec<Box<dyn RecipientTrait + Send>>,
+    payload: T,
+) -> Result<String, BmailError>
+where
+    T: Serialize,
+{
     //Stores cbored data
     let mut cbor_buffer: Vec<u8> = Vec::new();
     // Write payload into cbor_futter as cbor
     ciborium::ser::into_writer(&payload, &mut cbor_buffer)?;
     // Encrypt the plaintext to a ciphertext...
-    let encryptor =
-        age::Encryptor::with_recipients(recipients).expect("we provided a recipient");
+    let encryptor = age::Encryptor::with_recipients(recipients).expect("we provided a recipient");
 
     let mut encrypted = vec![];
     let mut writer = encryptor
@@ -75,25 +81,24 @@ pub async fn encrypt_and_encode<T>(recipients: Vec<Box<dyn RecipientTrait + Send
         .map_err::<BmailError, _>(Into::into)?;
     writer.write_all(cbor_buffer.as_slice())?;
     writer.finish()?;
-    println!("Number of Bytes: {}", encrypted.len());
 
     let encoded: String = general_purpose::STANDARD_NO_PAD.encode(&encrypted);
     Ok(encoded)
-
 }
 /// base64 decode, Decrypt with private key, and then decode from CBOR some data
-pub async fn decrypt_and_decode<T>(identity: &Identity, payload: &str) -> Result<T, BmailError> 
-where T: DeserializeOwned{
+pub async fn decrypt_and_decode<T>(identity: &Identity, payload: &str) -> Result<T, BmailError>
+where
+    T: DeserializeOwned,
+{
     let decoded = general_purpose::STANDARD_NO_PAD.decode(payload)?;
 
     // Decrypt Binary data
     let decrypted = {
-        let decryptor = match age::Decryptor::new(decoded.as_slice())
-            .map_err::<BmailError, _>(Into::into)?
-        {
-            age::Decryptor::Recipients(d) => d,
-            _ => unreachable!(),
-        };
+        let decryptor =
+            match age::Decryptor::new(decoded.as_slice()).map_err::<BmailError, _>(Into::into)? {
+                age::Decryptor::Recipients(d) => d,
+                _ => unreachable!(),
+            };
 
         let mut decrypted = vec![];
         let mut reader = decryptor
@@ -106,5 +111,4 @@ where T: DeserializeOwned{
         decrypted
     };
     Ok(ciborium::de::from_reader(decrypted.as_slice())?)
-
 }

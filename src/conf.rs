@@ -29,7 +29,7 @@ pub fn get_configuration() -> Result<Settings, BmailError> {
         .add_source(config::File::from(base_path.join("bmail")).required(true))
         // Add in settings from environment variables (with a prefix of APP and '__' as separator)
         // E.g. `APP_APPLICATION__PORT=5001 would set `Settings.application.port`
-        .add_source(config::Environment::with_prefix("BMAIL").separator("_"))
+        .add_source(config::Environment::with_prefix("BMAIL"))
         .build()?;
 
     settings.try_deserialize().map_err(Into::into)

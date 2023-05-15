@@ -1,0 +1,6 @@
+[user]
+handle=""
+password=""
+
+[key]
+file_path="keys/bmail_identity.secret"

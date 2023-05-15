@@ -1,16 +1,17 @@
-use crate::{errors::BmailError, key::{get_recipient_for_bskyer, decrypt_and_decode, encrypt_and_encode}, SharableBluesky};
-use age::{
-    x25519::{Identity},
-    Recipient as RecipientTrait,
+use crate::{
+    errors::BmailError,
+    key::{decrypt_and_decode, encrypt_and_encode, get_recipient_for_bskyer},
+    SharableBluesky,
 };
+use age::{x25519::Identity, Recipient as RecipientTrait};
 use bisky::lexicon::com::atproto::repo::{Blob, StrongRef};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    collections::{HashMap},
-};
+use serde_json::from_value;
+use std::{collections::BTreeMap, collections::HashMap};
 use uuid::Uuid;
+
+#[derive(Default)]
 pub struct Conversation {
     /// A Unique ID for the Conversation this is a part of, to make it easier for clients to poll a particular conversation. Multiple Records might have the same ID, this means they are participants of the same chain
     pub conversation_id: Uuid,
@@ -24,45 +25,67 @@ pub struct Conversation {
 }
 
 impl Conversation {
+    /// Get Message Records for each Participant. If newer messages exist, add them to the local conversation
+    /// This is run on initial conversation load in the UI, in case it's been updated since you last viewed it
+    /// by others or on another client
+    pub async fn update_with_messages_from_participants(
+        &mut self,
+        bsky: SharableBluesky,
+        user_handle: &str,
+        identity: &Identity,
+        participant_dids: Vec<String>,
+    ) -> Result<(), BmailError> {
+        let mixer_map: BTreeMap<MessageKey, DecryptedMessage> = BTreeMap::new();
+        // 0. Get date of latest message for each participant from storage
+        // This is covered by the recipient_active_time field
+        // 1. Get All Message Records for each participant
+        let mut bsky = bsky.0.write().await;
+        let mut user = bsky.user(user_handle)?;
 
-        /// Get Message Records for each Participant. If newer messages exist, add them to the local conversation
-        /// This is run on initial conversation load in the UI, in case it's been updated since you last viewed it
-        /// by others or on another client
-        pub async fn update_with_messages_from_participants(&mut self, bsky: SharableBluesky, user_handle: &str, identity: &Identity, participant_dids: Vec<String>) -> Result<(), BmailError> {
-            let mixer_map: BTreeMap<MessageKey, DecryptedMessage> = BTreeMap::new();
-            // 0. Get date of latest message for each participant from storage
-            // This is covered by the recipient_active_time field
-            // 1. Get All Message Records for each participant
-            let mut bsky = bsky.0.write().await;
-            let mut user = bsky.user(user_handle)?;
-            
-            // Is this cursed? Probably. Am I going to fix it now? Obviously not
-            for participant in participant_dids.iter(){
+        // Is this cursed? Probably. Am I going to fix it now? Obviously not
+        for participant in participant_dids.iter() {
+            let records = user
+                .list_all_records::<serde_json::Value>("app.bsky.actor.profile", participant, true)
+                .await?;
+            // TODO: Implement function to determine the type of response, replace above call with serde_json::Value
+            // Parse into final value
+            let mut bmail_records: Vec<BmailMessageRecord> = records
+                .into_iter()
+                .filter_map(|record| {
+                    if let serde_json::Value::Object(r) = &record.value {
+                        if r.get("bmail_type")
+                            == Some(&serde_json::Value::String("bmail".to_string()))
+                        {
+                            from_value(record.value).ok()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
-                let mut messages_stream = user.stream_records::<BmailMessageRecord>(participant, "app.bsky.profile", 100, false).await?;
-                let mut stream_output = Vec::new();
-                while let Ok(record) = messages_stream.next().await {
-                    stream_output.push(record);
-                }
-                // 1.1. Filter by Conversation ID
-                stream_output.drain_filter(|r| r.value.bmail_conversation_id != self.conversation_id);
-                // 1.2. Drop/Drain any that are older than the latest for each participant
-                let latest_post = self.recipient_active_time.get(&participant.to_string());
-                if let Some(latest_post) = latest_post{
-                    stream_output.drain_filter(|r| &r.value.bmail_created_at <= latest_post);
-                }
-                // 1.3 Add Them to the Mixer Map
-                for record in stream_output.into_iter(){
-                    let d_msg = decrypt_and_decode(identity, &record.value.bmail_cipher_text).await?;
-                    insert_with_collisions(&mut self.messages, &d_msg);
-
-                }
-
+            // 1.1. Filter by Conversation ID
+            bmail_records.drain_filter(|r| r.bmail_conversation_id != self.conversation_id);
+            // 1.2. Drop/Drain any that are older than the latest for each participant
+            let latest_post = self.recipient_active_time.get(&participant.to_string());
+            if let Some(latest_post) = latest_post {
+                bmail_records.drain_filter(|r| &r.bmail_created_at <= latest_post);
             }
-            //2. Drain mixer_map into conversation
-            mixer_map.into_iter().for_each(|(_k, v)| insert_with_collisions(&mut self.messages, &v));
-            Ok(())
-            } 
+            // 1.3 Add Them to the Mixer Map
+            for record in bmail_records.into_iter() {
+                let d_msg = record.into_decrypted_message(identity).await?;
+                insert_with_collisions(&mut self.messages, &d_msg);
+            }
+        }
+
+        //2. Drain mixer_map into conversation
+        mixer_map
+            .into_iter()
+            .for_each(|(_k, v)| insert_with_collisions(&mut self.messages, &v));
+        Ok(())
+    }
 }
 
 /// Keeps track of the messages seen on this client
@@ -76,37 +99,38 @@ pub struct MyConversationPortion {
 pub struct MessageKey {
     pub created_at: DateTime<Utc>,
     pub count: u32,
-
 }
-impl MessageKey{
-    pub fn new() -> Self{
-        Self{
+impl MessageKey {
+    pub fn new() -> Self {
+        Self {
             created_at: Utc::now(),
-            count: 0
+            count: 0,
         }
     }
-    pub fn new_with_count(count: u32) -> Self{
-        Self{
-            created_at: Utc::now(),
+    pub fn new_with_count(count: u32, created_at: &DateTime<Utc>) -> Self {
+        Self {
+            created_at: *created_at,
             count,
         }
     }
-    pub fn update_count(&mut self, count: u32) -> &Self{
-       self.count = count;
-       self
+    pub fn update_count(&mut self, count: u32) -> &Self {
+        self.count = count;
+        self
     }
 }
 
 /// Record type that can encoded for a Bmail Message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BmailMessageRecord {
-    /// The type of the Record for Bluesky. We don't really use it, but we might later
+    // The type of the Record, might be used by something later
     #[serde(rename(serialize = "$type", deserialize = "$type"))]
+    pub rust_type: String,
     pub bmail_created_at: DateTime<Utc>,
     pub bmail_conversation_id: Uuid,
     pub bmail_cipher_text: String,
     pub bmail_type: String,
     pub bmail_creator: String,
+    pub bmail_creator_handle: String,
     pub bmail_version: usize,
     pub bmail_recipients: Vec<String>,
 }
@@ -117,16 +141,49 @@ impl BmailMessageRecord {
         &self,
         identity: &Identity,
     ) -> Result<DecryptedMessage, BmailError> {
-
-        let binary_message=decrypt_and_decode(identity, &self.bmail_cipher_text).await?;
+        let binary_message = decrypt_and_decode(identity, &self.bmail_cipher_text).await?;
 
         Ok(DecryptedMessage {
             created_at: self.bmail_created_at,
             creator: self.bmail_creator.clone(),
+            creator_handle: self.bmail_creator_handle.clone(),
             conversation_id: self.bmail_conversation_id,
             message: String::from_utf8(binary_message).map_err(BmailError::FromStringError)?,
             recipients: self.bmail_recipients.clone(),
             version: self.bmail_version,
+        })
+    }
+}
+
+/// Record type that can encoded for a Bmail Message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FirehoseBmailMessageRecord {
+    /// The type of the Record for Bluesky. We don't really use it, but we might later
+    #[serde(rename(serialize = "$type", deserialize = "$type"))]
+    pub rust_type: String,
+    pub bmail_created_at: DateTime<Utc>,
+    pub bmail_conversation_id: String,
+    pub bmail_cipher_text: String,
+    pub bmail_type: String,
+    pub bmail_creator: String,
+    pub bmail_creator_handle: String,
+    pub bmail_version: usize,
+    pub bmail_recipients: Vec<String>,
+}
+
+impl TryFrom<FirehoseBmailMessageRecord> for BmailMessageRecord {
+    type Error = BmailError;
+    fn try_from(message: FirehoseBmailMessageRecord) -> Result<Self, Self::Error> {
+        Ok(Self {
+            bmail_conversation_id: Uuid::parse_str(&message.bmail_conversation_id)?,
+            rust_type: message.rust_type,
+            bmail_created_at: message.bmail_created_at,
+            bmail_cipher_text: message.bmail_cipher_text,
+            bmail_type: message.bmail_type,
+            bmail_creator: message.bmail_creator,
+            bmail_creator_handle: message.bmail_creator_handle,
+            bmail_version: message.bmail_version,
+            bmail_recipients: message.bmail_recipients,
         })
     }
 }
@@ -135,6 +192,7 @@ impl BmailMessageRecord {
 pub struct DecryptedMessage {
     pub created_at: DateTime<Utc>,
     pub creator: String,
+    pub creator_handle: String,
     pub conversation_id: Uuid,
     pub message: String,
     pub recipients: Vec<String>,
@@ -172,6 +230,8 @@ impl DecryptedMessage {
             bmail_version: self.version,
             bmail_recipients: self.recipients.clone(),
             bmail_creator: self.creator.clone(),
+            rust_type: "app.bsky.actor.profile".to_string(),
+            bmail_creator_handle: self.creator_handle.clone(),
         })
     }
 }
@@ -182,7 +242,9 @@ impl DecryptedMessage {
 pub struct BmailEnabledProfile {
     #[serde(rename(deserialize = "$type", serialize = "$type"))]
     pub rust_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar: Option<Blob>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub banner: Option<Blob>,
     pub description: Option<String>,
     #[serde(rename(deserialize = "displayName", serialize = "displayName"))]
@@ -193,6 +255,7 @@ pub struct BmailEnabledProfile {
     pub bmail_notification_uri: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bmail_notification_cid: Option<String>,
+    pub bmail_rc_map: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,22 +270,25 @@ pub struct BmailLike {
 }
 
 /// Function that can be recursed over to insert into a BTreeMap with possible collisions
-pub fn insert_with_collisions(map: &mut BTreeMap<MessageKey, DecryptedMessage>, msg: &DecryptedMessage){
+pub fn insert_with_collisions(
+    map: &mut BTreeMap<MessageKey, DecryptedMessage>,
+    msg: &DecryptedMessage,
+) {
     let mut count = 0;
-    let mut key = MessageKey::new_with_count(count);
+    let mut key = MessageKey::new_with_count(count, &msg.created_at);
     loop {
-        if !map.contains_key(&key){
+        if !map.contains_key(&key) {
             map.insert(key.clone(), msg.clone());
-            return
+            return;
         }
-        count+=1;
+        count += 1;
         key.update_count(count);
     }
 }
 
 /// The types of things the Firehose might send and be returned from the Firehose thread
 #[derive(Debug, Clone)]
-pub enum FirehoseMessages{
+pub enum FirehoseMessages {
     Bmail(BmailMessageRecord),
-    BmailLike(BmailLike)
+    BmailLike(BmailLike),
 }
