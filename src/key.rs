@@ -85,6 +85,22 @@ where
     let encoded: String = general_purpose::STANDARD_NO_PAD.encode(&encrypted);
     Ok(encoded)
 }
+
+/// CBORify and base64 encode some data to fit in JS requirements
+pub async fn encode<T>(
+    payload: T,
+) -> Result<String, BmailError>
+where
+    T: Serialize,
+{
+    //Stores cbored data
+    let mut cbor_buffer: Vec<u8> = Vec::new();
+    // Write payload into cbor_futter as cbor
+    ciborium::ser::into_writer(&payload, &mut cbor_buffer)?;
+
+    let encoded: String = general_purpose::STANDARD_NO_PAD.encode(&cbor_buffer);
+    Ok(encoded)
+}
 /// base64 decode, Decrypt with private key, and then decode from CBOR some data
 pub async fn decrypt_and_decode<T>(identity: &Identity, payload: &str) -> Result<T, BmailError>
 where
@@ -111,4 +127,13 @@ where
         decrypted
     };
     Ok(ciborium::de::from_reader(decrypted.as_slice())?)
+}
+/// base64 decode, and then decode from CBOR some data
+pub async fn decode<T>(payload: &str) -> Result<T, BmailError>
+where
+    T: DeserializeOwned,
+{
+    let decoded = general_purpose::STANDARD_NO_PAD.decode(payload)?;
+
+    Ok(ciborium::de::from_reader(decoded.as_slice())?)
 }

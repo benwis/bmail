@@ -24,7 +24,7 @@ use uuid::Uuid;
 use crate::{
     conf::Settings,
     errors::BmailError,
-    key::{decrypt_and_decode, encrypt_and_encode, get_recipient_for_bskyer},
+    key::{get_recipient_for_bskyer, decode, encode},
     message::{
         insert_with_collisions, BmailEnabledProfile, BmailLike, Conversation, DecryptedMessage,
         FirehoseMessages,
@@ -90,7 +90,7 @@ impl App {
         if profile_record.value.bmail_notification_uri.is_none() {
             self.create_notification_post().await?;
         }
-        //TODO Get Conversation IDs and Recipient Lists from Profile(encrypted)
+        //TODO Get Conversation IDs and Recipient Lists from Profile
 
         Ok(())
     }
@@ -114,6 +114,7 @@ impl App {
                 let recipient_did = user.resolve_handle(recipient).await?;
                 dids.push(recipient_did);
             }
+            dids.sort();
             dids
         };
         //println!("DIDS: {:?}", participant_dids);
@@ -121,6 +122,7 @@ impl App {
         // 2. Check if all DIDs are present in Conversation Storage as a key
         let mut conversation_id = None;
         for conversation in self.recipients_conversation_map.iter() {
+            // We need the Vec as the HashMap Key to be sorted
             match conversation
                 .0
                 .iter()
@@ -143,10 +145,47 @@ impl App {
             .await
         {
             self.current_conversation_id = Some(c_id);
+
+            self.recipients_conversation_map
+            .insert(participant_dids.clone(), c_id);
+        // Create a new conversation
+        let conversation = Conversation {
+            conversation_id: c_id,
+            messages: BTreeMap::default(),
+            recipient_active_time: HashMap::default(),
+            participants: participant_dids.clone(),
+        };
+        self.conversations
+            .insert(c_id, conversation);
+
+        self.upload_rc_map_to_profile(participant_dids.clone(), c_id)
+            .await?;
+
+        // Check in participant profiles if a conversation exists. If it does, add it to our local storage
+        } else if let Ok(Some(c_id)) = self.get_cid_from_rc_map_from_participants_profiles(participant_dids.clone()).await{
+            println!("Found in Recipient");
+            self.current_conversation_id = Some(c_id);
+
+            self.recipients_conversation_map
+                .insert(participant_dids.clone(), c_id);
+            // Create a new conversation
+            let new_conversation = Conversation {
+                conversation_id: c_id,
+                messages: BTreeMap::default(),
+                recipient_active_time: HashMap::default(),
+                participants: participant_dids.clone(),
+            };
+            self.conversations
+                .insert(c_id, new_conversation);
+
+            self.upload_rc_map_to_profile(participant_dids.clone(), c_id)
+                .await?;
+
         }
         // Else create a new one
         else {
             let new_conversation_id = Uuid::new_v4();
+
             self.current_conversation_id = Some(new_conversation_id);
             self.recipients_conversation_map
                 .insert(participant_dids.clone(), new_conversation_id);
@@ -200,20 +239,21 @@ impl App {
     /// Get that Hashmap
     pub async fn get_rc_map_from_profile(
         &mut self,
+        handle: &str,
     ) -> Result<Option<HashMap<Vec<String>, Uuid>>, BmailError> {
         let mut bsky = self.bluesky.0.write().await;
         let mut user = bsky.user(&self.conf.user.handle)?;
         let profile_record = user
             .get_record::<BmailEnabledProfile>(
-                &self.conf.user.handle,
+                handle,
                 "app.bsky.actor.profile",
                 "self",
             )
             .await?;
 
-        if let Some(r_map) = &profile_record.value.bmail_rc_map {
-            let r_map = decrypt_and_decode(&self.identity, r_map).await?;
-            Ok(Some(r_map))
+        if let Some(r_map) = profile_record.value.bmail_rc_map {
+             let decoded = decode(&r_map).await?;
+            Ok(Some(decoded))
         } else {
             Ok(None)
         }
@@ -226,8 +266,8 @@ impl App {
         &mut self,
         participants: Vec<String>,
     ) -> Result<Option<Uuid>, BmailError> {
-        let profile_rc_map = self.get_rc_map_from_profile().await?;
-
+        let handle = self.conf.user.handle.clone();
+        let profile_rc_map = self.get_rc_map_from_profile(&handle).await?;
         if let Some(rc_map) = &profile_rc_map {
             let mut conversation_id = None;
             for keys in rc_map.keys() {
@@ -248,6 +288,33 @@ impl App {
         }
     }
 
+    /// Check for a conversation ID in each participants profiles, so that if they make a conversation with me, and I try to make one later,
+    /// it will find their ID and use it for my local conversation
+    pub async fn get_cid_from_rc_map_from_participants_profiles(
+        &mut self,
+        participants: Vec<String>,
+    ) -> Result<Option<Uuid>, BmailError> {
+
+        for participant in participants.iter(){
+            let profile_rc_map = self.get_rc_map_from_profile(participant).await?;
+
+            if let Some(rc_map) = &profile_rc_map {
+                for keys in rc_map.keys() {
+                    // Need to check length because we might have one vector contain all of another
+                    match keys.iter().all(|item| participants.contains(item)) && participants.len() == keys.len() {
+                        true => {
+                            let c_id = rc_map.get(keys).unwrap();
+                            //println!("FOUND KEYS: {:#?}", keys);
+                            return Ok(Some(*c_id));
+                        }
+                        false => continue,
+                    };
+                }
+            }
+    }
+    Ok(None)
+}
+
     /// Get the current rc_map from profile and add a new value to it
     pub async fn upload_rc_map_to_profile(
         &mut self,
@@ -257,30 +324,31 @@ impl App {
         let handle = self.conf.user.handle.clone();
 
         //Get existing Record so we can only change one thing
-        let (_recipient, mut profile_record) = match self.get_recipient_for_bskyer(&handle).await {
-            Ok(r) => r,
-            Err(_) => return Err(BmailError::InternalServerError),
+        // let (_recipient, mut profile_record) = match self.get_recipient_for_bskyer(&handle).await {
+        //     Ok(r) => r,
+        //     Err(_) => return Err(BmailError::InternalServerError),
+        // };
+
+        let mut profile_record = {
+            let mut bsky = self.bluesky.0.write().await;
+            let mut user = bsky.user(&handle)?;
+            user.get_record::<BmailEnabledProfile>(&handle, "app.bsky.actor.profile", "self").await?
         };
 
-        // Create Recipient from stored Identity for Myself
-        let my_recipient = self.identity.to_public();
-
-        let rc_map = match profile_record.value.bmail_rc_map {
-            Some(m) => {
-                let mut rc_map: HashMap<Vec<String>, Uuid> =
-                    decrypt_and_decode(&self.identity, &m).await?;
+        match &mut profile_record.value.bmail_rc_map {
+            Some(m) => {      
+                let mut rc_map: HashMap<Vec<String>, Uuid> = decode(m).await?; 
                 rc_map.insert(key, value);
-                // Myself only target here
-                encrypt_and_encode(vec![Box::new(my_recipient)], rc_map).await?
+                let encoded = encode(rc_map).await?;
+                profile_record.value.bmail_rc_map = Some(encoded);     
             }
             None => {
                 let mut new_rc_map = HashMap::new();
                 new_rc_map.insert(key, value);
-                encrypt_and_encode(vec![Box::new(my_recipient)], new_rc_map).await?
+                let encoded_map = encode(new_rc_map).await?;
+                profile_record.value.bmail_rc_map = Some(encoded_map);
             }
         };
-
-        profile_record.value.bmail_rc_map = Some(rc_map);
 
         let mut bsky = self.bluesky.0.write().await;
         let mut me = bsky.me()?;
@@ -758,7 +826,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
                 .map(|(k, v)| {
                     let content = Spans::from(Span::raw(format!(
                         "{} {}: {}",
-                        k.created_at, v.creator, v.message
+                        k.created_at, v.creator_handle, v.message
                     )));
                     ListItem::new(content)
                 })

@@ -16,6 +16,7 @@ use futures::StreamExt as _;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use serde_cbor::value::from_value;
 use serde_cbor::Value::Text;
+use uuid::Uuid;
 use std::io::{self, Cursor};
 use std::path::PathBuf;
 use std::sync::Arc;
