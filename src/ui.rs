@@ -123,10 +123,7 @@ impl App {
         let mut conversation_id = None;
         for conversation in self.recipients_conversation_map.iter() {
             // We need the Vec as the HashMap Key to be sorted
-            match conversation
-                .0
-                .iter()
-                .all(|item| participant_dids.contains(item))
+            match conversation.0 == &participant_dids
             {
                 true => {
                     conversation_id = Some(*conversation.1);
@@ -270,12 +267,12 @@ impl App {
         let profile_rc_map = self.get_rc_map_from_profile(&handle).await?;
         if let Some(rc_map) = &profile_rc_map {
             let mut conversation_id = None;
-            for keys in rc_map.keys() {
-                // Need to check length because we might have one vector contain all of another
-                match keys.iter().all(|item| participants.contains(item)) && participants.len() == keys.len() {
+            for key in rc_map.keys() {
+                match key == &participants{
+                // match key.iter().all(|item| participants.contains(item)) && participants.len() == keys.len() {
                     true => {
-                        let c_id = rc_map.get(keys).unwrap();
-                        //println!("FOUND KEYS: {:#?}", keys);
+                        let c_id = rc_map.get(key).unwrap();
+                        println!("K P: {:?}||{:?}||{:?}", key, participants, c_id);
                         conversation_id = Some(*c_id);
                         break;
                     }
@@ -323,12 +320,6 @@ impl App {
     ) -> Result<(), BmailError> {
         let handle = self.conf.user.handle.clone();
 
-        //Get existing Record so we can only change one thing
-        // let (_recipient, mut profile_record) = match self.get_recipient_for_bskyer(&handle).await {
-        //     Ok(r) => r,
-        //     Err(_) => return Err(BmailError::InternalServerError),
-        // };
-
         let mut profile_record = {
             let mut bsky = self.bluesky.0.write().await;
             let mut user = bsky.user(&handle)?;
@@ -364,6 +355,38 @@ impl App {
 
         Ok(())
     }
+
+   /// Get the current rc_map from profile and add a new value to it
+   pub async fn delete_rc_map_from_profile(
+    &mut self,
+) -> Result<(), BmailError> {
+    let handle = self.conf.user.handle.clone();
+
+    let mut profile_record = {
+        let mut bsky = self.bluesky.0.write().await;
+        let mut user = bsky.user(&handle)?;
+        user.get_record::<BmailEnabledProfile>(&handle, "app.bsky.actor.profile", "self").await?
+    };
+
+
+    profile_record.value.bmail_rc_map = None;     
+    
+
+    let mut bsky = self.bluesky.0.write().await;
+    let mut me = bsky.me()?;
+    me.put_record(
+        "app.bsky.actor.profile",
+        "self",
+        None,
+        None,
+        Some(&profile_record.cid),
+        &profile_record.value,
+    )
+    .await?;
+
+    Ok(())
+}
+    
 
     /// Scrape the recipient's Profile for their Public Key so we can encrypt this thing
     pub async fn get_recipient_for_bskyer(

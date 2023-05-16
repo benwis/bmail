@@ -80,6 +80,8 @@ async fn main() -> Result<(), BmailError> {
     // Initialize Profile for Bmail Message Sending
     app.initialize().await?;
 
+    //app.delete_rc_map_from_profile().await?;
+
     // A new task is spawned for processing firehose messages. The socket is
     // moved to the new task and processed there.
     let _firehose = tokio::spawn(async move {

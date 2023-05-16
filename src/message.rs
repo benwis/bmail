@@ -47,7 +47,7 @@ impl Conversation {
             let records = user
                 .list_all_records::<serde_json::Value>("app.bsky.actor.profile", participant, true)
                 .await?;
-            // TODO: Implement function to determine the type of response, replace above call with serde_json::Value
+
             // Parse into final value
             let mut bmail_records: Vec<BmailMessageRecord> = records
                 .into_iter()
@@ -69,6 +69,7 @@ impl Conversation {
             // 1.1. Filter by Conversation ID
             bmail_records.drain_filter(|r| r.bmail_conversation_id != self.conversation_id);
             // 1.2. Drop/Drain any that are older than the latest for each participant
+            // TODO: This is being skipped because active_time is not updated
             let latest_post = self.recipient_active_time.get(&participant.to_string());
             if let Some(latest_post) = latest_post {
                 bmail_records.drain_filter(|r| &r.bmail_created_at <= latest_post);
@@ -188,7 +189,7 @@ impl TryFrom<FirehoseBmailMessageRecord> for BmailMessageRecord {
     }
 }
 //Data structure for a single Bmail
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DecryptedMessage {
     pub created_at: DateTime<Utc>,
     pub creator: String,
@@ -270,6 +271,7 @@ pub struct BmailLike {
 }
 
 /// Function that can be recursed over to insert into a BTreeMap with possible collisions
+/// If the value is present at the key, skip insert
 pub fn insert_with_collisions(
     map: &mut BTreeMap<MessageKey, DecryptedMessage>,
     msg: &DecryptedMessage,
@@ -277,7 +279,15 @@ pub fn insert_with_collisions(
     let mut count = 0;
     let mut key = MessageKey::new_with_count(count, &msg.created_at);
     loop {
-        if !map.contains_key(&key) {
+        // If the key is present, and the messages match, we don't need to insert it again
+        if map.contains_key(&key){
+            let val = map.get(&key).unwrap(); 
+            if val == msg{
+                return;
+            } 
+        }
+        // If the key is not present, then we need to insert it 
+        else if !map.contains_key(&key) {
             map.insert(key.clone(), msg.clone());
             return;
         }
