@@ -304,7 +304,7 @@ impl App {
             }
             
             let profile_rc_map = self.get_rc_map_from_profile(participant).await?;
-            println!("profile_rc_map: {:?}", profile_rc_map);
+            //println!("profile_rc_map: {:?}", profile_rc_map);
             if let Some(rc_map) = &profile_rc_map {
                 for key in rc_map.keys() {
                     // Need to check length because we might have one vector contain all of another
