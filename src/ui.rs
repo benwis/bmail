@@ -141,6 +141,7 @@ impl App {
             .get_cid_from_rc_map_from_profile(participant_dids.clone())
             .await
         {
+            //println!("MY PROFILE");
             self.current_conversation_id = Some(c_id);
 
             self.recipients_conversation_map
@@ -160,7 +161,7 @@ impl App {
 
         // Check in participant profiles if a conversation exists. If it does, add it to our local storage
         } else if let Ok(Some(c_id)) = self.get_cid_from_rc_map_from_participants_profiles(participant_dids.clone()).await{
-            println!("Found in Recipient");
+            //println!("THEIR PROFILE: {c_id}");
             self.current_conversation_id = Some(c_id);
 
             self.recipients_conversation_map
@@ -181,6 +182,7 @@ impl App {
         }
         // Else create a new one
         else {
+            //println!("NEW");
             let new_conversation_id = Uuid::new_v4();
 
             self.current_conversation_id = Some(new_conversation_id);
@@ -272,7 +274,7 @@ impl App {
                 // match key.iter().all(|item| participants.contains(item)) && participants.len() == keys.len() {
                     true => {
                         let c_id = rc_map.get(key).unwrap();
-                        println!("K P: {:?}||{:?}||{:?}", key, participants, c_id);
+                        //println!("K P: {:?}||{:?}||{:?}", key, participants, c_id);
                         conversation_id = Some(*c_id);
                         break;
                     }
@@ -292,15 +294,23 @@ impl App {
         participants: Vec<String>,
     ) -> Result<Option<Uuid>, BmailError> {
 
-        for participant in participants.iter(){
-            let profile_rc_map = self.get_rc_map_from_profile(participant).await?;
 
+        for participant in participants.iter(){
+            if let Some(user_did) = &self.user_did{
+                // Skip if it's me
+                if participant == user_did{
+                    continue
+                }
+            }
+            
+            let profile_rc_map = self.get_rc_map_from_profile(participant).await?;
+            println!("profile_rc_map: {:?}", profile_rc_map);
             if let Some(rc_map) = &profile_rc_map {
-                for keys in rc_map.keys() {
+                for key in rc_map.keys() {
                     // Need to check length because we might have one vector contain all of another
-                    match keys.iter().all(|item| participants.contains(item)) && participants.len() == keys.len() {
+                    match key == &participants {
                         true => {
-                            let c_id = rc_map.get(keys).unwrap();
+                            let c_id = rc_map.get(key).unwrap();
                             //println!("FOUND KEYS: {:#?}", keys);
                             return Ok(Some(*c_id));
                         }
@@ -547,13 +557,26 @@ impl App {
         let Some(user_did) = &self.user_did else {
             return Err(BmailError::InternalServerError)
         };
+
+        // 0. Get DIDS for participants
+        let participant_dids = {
+            let mut dids: Vec<String> = Vec::with_capacity(recipients.len());
+            let mut bsky = self.bluesky.0.write().await;
+            let mut user = bsky.user(&self.conf.user.handle)?;
+            for recipient in &recipients {
+                let recipient_did = user.resolve_handle(recipient).await?;
+                dids.push(recipient_did);
+            }
+            dids.sort();
+            dids
+        };
         // Create Message
         let msg = DecryptedMessage {
             created_at: Utc::now(),
             creator: user_did.clone(),
             message: msg.to_string(),
             conversation_id,
-            recipients: recipients.clone(),
+            recipients: participant_dids.clone(),
             version: 0,
             creator_handle: self.conf.user.handle.clone(),
         };
@@ -611,7 +634,8 @@ pub async fn run_app<B: Backend>(
             match &rx.try_recv() {
                 Ok(m) => match m {
                     FirehoseMessages::Bmail(m) => {
-                        println!("FOUND BMAIL");
+                        // println!("FOUND BMAIL");
+                        // println!("\x07");
                         let msg = m.into_decrypted_message(&app.identity).await?;
                         app.add_bmail_to_conversation(msg.conversation_id, &msg)?;
                     }

@@ -16,7 +16,6 @@ use futures::StreamExt as _;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use serde_cbor::value::from_value;
 use serde_cbor::Value::Text;
-use uuid::Uuid;
 use std::io::{self, Cursor};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -81,6 +80,7 @@ async fn main() -> Result<(), BmailError> {
     app.initialize().await?;
 
     //app.delete_rc_map_from_profile().await?;
+    //app.load_conversation(vec!["benw.is".to_string()]).await?;
 
     // A new task is spawned for processing firehose messages. The socket is
     // moved to the new task and processed there.
@@ -88,7 +88,7 @@ async fn main() -> Result<(), BmailError> {
         let _ = process_message(socket, tx, user_did).await;
     });
 
-    // firehose.await.unwrap();
+    //firehose.await.unwrap();
 
     // setup terminal
     enable_raw_mode()?;
@@ -128,7 +128,6 @@ pub async fn process_message(
             }
             let operation = &commit.operations[0];
             if !operation.path.starts_with("app.bsky.actor.profile/")
-                || !operation.path.starts_with("app.bsky.notification.like/")
             {
                 continue;
             }
@@ -146,9 +145,8 @@ pub async fn process_message(
                         if r.get(&Text("bmail_type".to_string()))
                             == Some(&Text("bmail".to_string()))
                         {
-                            // println!("Found Bmail Message");
-                            let bmail: FirehoseBmailMessageRecord =
-                                from_value(value.unwrap()).unwrap();
+                            let bmail: FirehoseBmailMessageRecord = from_value(value.unwrap()).unwrap();
+                            //println!("{bmail:#?}");
                             if bmail.bmail_recipients.contains(&user_did) {
                                 tx.send(FirehoseMessages::Bmail(bmail.try_into()?))
                                     .await
@@ -158,10 +156,10 @@ pub async fn process_message(
                             == Some(&Text("notification".to_string()))
                         {
                             // println!("Found New Bmail Notification");
-                            let notif: BmailLike = from_value(value.unwrap()).unwrap();
-                            tx.send(FirehoseMessages::BmailLike(notif))
-                                .await
-                                .map_err::<BmailError, _>(Into::into)?;
+                            let _notif: BmailLike = from_value(value.unwrap()).unwrap();
+                            // tx.send(FirehoseMessages::BmailLike(notif))
+                            //     .await
+                            //     .map_err::<BmailError, _>(Into::into)?;
                         }
                     }
                     Err(_) => (),
