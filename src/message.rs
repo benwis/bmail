@@ -85,6 +85,7 @@ impl Conversation {
         mixer_map
             .into_iter()
             .for_each(|(_k, v)| insert_with_collisions(&mut self.messages, &v));
+        
         Ok(())
     }
 }

@@ -538,6 +538,8 @@ impl App {
         match self.conversations.get_mut(&conv_id) {
             Some(c) => {
                 insert_with_collisions(&mut c.messages, msg);
+                // Set current state to newest message
+                self.conversation_state.select(Some(c.messages.keys().count()-1));
                 Ok(())
             }
             None => Err(BmailError::ConversationNotFound),
@@ -676,7 +678,7 @@ pub async fn run_app<B: Backend>(
                             recipients_input.split(',').map(|s| s.to_string()).collect();
                         let input = app.input.clone();
                         match app.send_bmail(*c_id, recipients, &input).await {
-                            Ok(_) => (),
+                            Ok(_) => app.input= "".to_string(),
                             Err(BmailError::MissingRecipient(r)) => {
                                 app.status = format!("Recipient {} is not using Bmail", r)
                             }
@@ -825,7 +827,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
                 Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" to choose recipient, "),
                 Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" to send the message"),
+                Span::raw(" to load the conversation"),
             ],
             Style::default(),
         ),
@@ -873,7 +875,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
                 .map(|(k, v)| {
                     let content = Spans::from(Span::raw(format!(
                         "{} {}: {}",
-                        k.created_at, v.creator_handle, v.message
+                        k.created_at.format("%Y/%m/%d %H:%M"), v.creator_handle, v.message
                     )));
                     ListItem::new(content)
                 })
