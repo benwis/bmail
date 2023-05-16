@@ -11,8 +11,8 @@ name="bmail"
 [dependencies]
 age = {version="0.9.1"}
 base64 = "0.21.0"
-# bisky = {git="https://github.com/benwis/bisky", branch="firehose"}
-bisky = {path="../../bisky"}
+bisky = {git="https://github.com/benwis/bisky", branch="firehose"}
+#bisky = {path="../../bisky"}
 chrono = "0.4.24"
 ciborium = "0.2.1"
 clap = "4.2.7"

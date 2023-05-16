@@ -188,6 +188,7 @@ checksum = "d86b93f97252c47b41663388e6d155714a9d0c398b99f1005cbc5f978b29f445"
 [[package]]
 name = "bisky"
 version = "0.1.4"
+source = "git+https://github.com/benwis/bisky?branch=firehose#16cd19ea3c6230d4d09023038c2c70abbc2b822a"
 dependencies = [
  "async-trait",
  "chrono",
